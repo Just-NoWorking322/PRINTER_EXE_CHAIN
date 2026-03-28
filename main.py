@@ -311,9 +311,11 @@ def _fetch_receipt_text_via_api(client: JwtClient, sale_id: Any) -> str | None:
 
 
 # Глобальный сканер: пауза между символами больше — начинаем новый штрих (ручной ввод цифр в поиске).
-BARCODE_INTERKEY_RESET_MS = 180
+BARCODE_INTERKEY_RESET_MS = 280
 MIN_BARCODE_LEN = 4
-LIVE_SEARCH_DEBOUNCE_SEC = 0.35
+# Поле поиска: не запускать живой поиск по API, пока введена длинная «только цифры» (сканер печатает в фокус).
+BARCODE_LIKE_MIN_DIGITS = 8
+LIVE_SEARCH_DEBOUNCE_SEC = 0.28
 
 # NUR CRM: светлый контент, акцент #f7d617, тёмный сайдбар
 UI_BRAND = "#f7d617"
@@ -374,7 +376,7 @@ def _sidebar_nav_item(icon, label: str, *, active: bool = False) -> ft.Container
             ],
             spacing=10,
         ),
-        padding=ft.padding.only(left=4, top=8, bottom=8, right=8),
+        padding=ft.Padding.only(left=4, top=8, bottom=8, right=8),
         bgcolor=ft.Colors.with_opacity(0.14, UI_ACCENT) if active else None,
         border_radius=8,
     )
@@ -405,6 +407,11 @@ def _key_to_barcode_char(key: str) -> str | None:
         if tail:
             return tail[-1]
     return None
+
+
+def _looks_like_barcode_query(q: str) -> bool:
+    s = (q or "").strip()
+    return len(s) >= BARCODE_LIKE_MIN_DIGITS and s.isdigit()
 
 
 def _is_enter_key(key: str) -> bool:
@@ -710,7 +717,7 @@ def main(page: ft.Page):
                         color=UI_MUTED,
                         size=14,
                     ),
-                    padding=ft.padding.symmetric(vertical=24, horizontal=8),
+                    padding=ft.Padding.symmetric(vertical=24, horizontal=8),
                     alignment=ft.Alignment.CENTER,
                 )
             )
@@ -809,8 +816,8 @@ def main(page: ft.Page):
                             ],
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                         ),
-                        padding=ft.padding.symmetric(vertical=10, horizontal=12),
-                        margin=ft.margin.only(bottom=8),
+                        padding=ft.Padding.symmetric(vertical=10, horizontal=12),
+                        margin=ft.Margin.only(bottom=8),
                         bgcolor=UI_SURFACE_ELEV,
                         border_radius=10,
                         border=ft.Border.all(1, UI_BORDER),
@@ -893,17 +900,27 @@ def main(page: ft.Page):
         if not cid:
             show_error("Сначала начните продажу (кнопка «Начать продажу»)")
             return
-        set_loading(True)
-        try:
-            session["cart"] = client.pos_scan(cid, code)
+        session["scan_seq"] = int(session.get("scan_seq") or 0) + 1
+        seq = session["scan_seq"]
+        cid_s = str(cid)
+
+        async def _scan_task():
+            try:
+                cart = await asyncio.to_thread(client.pos_scan, cid_s, code)
+            except ApiError as ex:
+                if seq == session.get("scan_seq"):
+                    show_error(str(ex))
+                return
+            if seq != session.get("scan_seq"):
+                return
+            session["cart"] = cart
             render_cart_items()
             if search_field_ref.current:
                 search_field_ref.current.value = ""
             clear_search_results()
-        except ApiError as ex:
-            show_error(str(ex))
-        finally:
-            set_loading(False)
+            page.update()
+
+        page.run_task(_scan_task)
 
     def on_global_keyboard(e: ft.KeyboardEvent):
         if not session.get("cashier_active"):
@@ -987,7 +1004,7 @@ def main(page: ft.Page):
                     ),
                     bgcolor=UI_SURFACE_ELEV,
                     border_radius=8,
-                    margin=ft.margin.only(bottom=6),
+                    margin=ft.Margin.only(bottom=6),
                     border=ft.Border.all(1, UI_BORDER),
                 )
             )
@@ -1035,14 +1052,23 @@ def main(page: ft.Page):
         if my_gen != session["search_gen"]:
             return
         q = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+        if _looks_like_barcode_query(q):
+            return
         _do_search(q, silent=True)
 
     def on_search_change(_):
+        q = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+        if _looks_like_barcode_query(q):
+            return
         session["search_gen"] = session.get("search_gen", 0) + 1
         page.run_task(_delayed_live_search, session["search_gen"])
 
     def on_search_submit(_):
         q = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+        if _looks_like_barcode_query(q):
+            process_scan_code(q)
+            page.update()
+            return
         _do_search(q, silent=False)
 
     def open_shift_dlg(_):
@@ -1374,7 +1400,7 @@ def main(page: ft.Page):
                                 spacing=4,
                                 tight=True,
                             ),
-                            padding=ft.padding.symmetric(horizontal=20, vertical=18),
+                            padding=ft.Padding.symmetric(horizontal=20, vertical=18),
                             bgcolor=UI_SURFACE,
                             border_radius=16,
                             border=ft.Border.only(
@@ -1400,7 +1426,7 @@ def main(page: ft.Page):
                     width=380,
                     spacing=0,
                 ),
-                padding=ft.padding.only(top=4),
+                padding=ft.Padding.only(top=4),
             ),
             actions=[
                         ft.OutlinedButton(
@@ -1410,7 +1436,7 @@ def main(page: ft.Page):
                         side=ft.BorderSide(1, UI_BORDER),
                         bgcolor=UI_SURFACE,
                         shape=ft.RoundedRectangleBorder(radius=10),
-                        padding=ft.padding.symmetric(horizontal=20, vertical=12),
+                        padding=ft.Padding.symmetric(horizontal=20, vertical=12),
                     ),
                     on_click=close_checkout_dlg,
                 ),
@@ -1421,13 +1447,13 @@ def main(page: ft.Page):
                         bgcolor=UI_ACCENT,
                         color=UI_TEXT_ON_YELLOW,
                         shape=ft.RoundedRectangleBorder(radius=10),
-                        padding=ft.padding.symmetric(horizontal=22, vertical=12),
+                        padding=ft.Padding.symmetric(horizontal=22, vertical=12),
                     ),
                     on_click=do_pay,
                 ),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
-            actions_padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            actions_padding=ft.Padding.symmetric(horizontal=20, vertical=16),
         )
         page.show_dialog(dlg)
 
@@ -1510,7 +1536,7 @@ def main(page: ft.Page):
                                             style=ft.ButtonStyle(
                                                 bgcolor=UI_ACCENT,
                                                 color=UI_TEXT_ON_YELLOW,
-                                                padding=ft.padding.symmetric(vertical=14),
+                                                padding=ft.Padding.symmetric(vertical=14),
                                                 shape=ft.RoundedRectangleBorder(radius=10),
                                             ),
                                             on_click=do_login,
@@ -1521,7 +1547,7 @@ def main(page: ft.Page):
                                     tight=True,
                                     horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                                 ),
-                                padding=ft.padding.only(left=28, right=36, top=36, bottom=36),
+                                padding=ft.Padding.only(left=28, right=36, top=36, bottom=36),
                                 expand=True,
                             ),
                         ],
@@ -1821,7 +1847,7 @@ def main(page: ft.Page):
                     width=460,
                 ),
                 height=480,
-                padding=ft.padding.only(right=8),
+                padding=ft.Padding.only(right=8),
             ),
             actions=[
                 ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
@@ -2004,7 +2030,7 @@ def main(page: ft.Page):
                     scroll=ft.ScrollMode.AUTO,
                     width=460,
                 ),
-                padding=ft.padding.only(right=8),
+                padding=ft.Padding.only(right=8),
             ),
             actions=[
                 ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
@@ -2130,7 +2156,7 @@ def main(page: ft.Page):
                                 [
                                     ft.Text("Сканер штрихкода", size=13, weight=ft.FontWeight.W_600, color=UI_TEXT),
                                     ft.Text(
-                                        "Глобально: символы подряд (пауза ≤ 0,18 с), Enter — добавить. "
+                                        "Глобально: символы подряд (пауза ≤ 0,28 с), Enter — добавить. "
                                         "Поиск по названию отдельно; кириллица не уходит в штрихкод.",
                                         size=12,
                                         color=UI_MUTED,
@@ -2309,7 +2335,7 @@ def main(page: ft.Page):
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
             expand=True,
-            margin=ft.margin.only(right=10, top=10, bottom=10),
+            margin=ft.Margin.only(right=10, top=10, bottom=10),
         )
 
         scale_weight_panel = None
@@ -2362,13 +2388,13 @@ def main(page: ft.Page):
             bgcolor=UI_SURFACE,
             border_radius=16,
             border=ft.Border.all(1, UI_BORDER),
-            margin=ft.margin.only(right=10, bottom=10, top=10, left=8),
+            margin=ft.Margin.only(right=10, bottom=10, top=10, left=8),
         )
 
         sidebar = ft.Container(
             width=220,
             bgcolor=UI_SIDEBAR,
-            padding=ft.padding.only(top=20, bottom=24, left=14, right=12),
+            padding=ft.Padding.only(top=20, bottom=24, left=14, right=12),
             content=ft.Column(
                 [
                     ft.Row(
@@ -2516,7 +2542,7 @@ def main(page: ft.Page):
                 spacing=10,
                 tight=True,
             ),
-            padding=ft.padding.symmetric(horizontal=24, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=24, vertical=16),
             bgcolor=UI_SURFACE,
             border=ft.Border.only(
                 bottom=ft.BorderSide(3, UI_ACCENT),

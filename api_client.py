@@ -53,6 +53,8 @@ class JwtClient:
         self.refresh: str | None = None
         self.user_payload: dict[str, Any] = {}
         self.active_branch_id: str | None = None
+        # Одно TCP/TLS-соединение с API (keep-alive) — заметно быстрее серии запросов, чем requests.request каждый раз.
+        self._session = requests.Session()
 
     def set_tokens(self, access: str, refresh: str | None, user_payload: dict[str, Any] | None = None):
         self.access = access
@@ -79,10 +81,14 @@ class JwtClient:
         self.refresh = None
         self.user_payload = {}
         self.active_branch_id = None
+        self._session.close()
+        self._session = requests.Session()
 
     def login(self, email: str, password: str) -> dict[str, Any]:
         url = f"{self.base_url}/api/users/auth/login/"
-        r = requests.post(url, json={"email": email.strip(), "password": password}, timeout=30)
+        r = self._session.post(
+            url, json={"email": email.strip(), "password": password}, timeout=30
+        )
         if r.status_code != 200:
             raise ApiError(_parse_error(r), status_code=r.status_code, payload=self._safe_json(r))
         data = r.json()
@@ -98,7 +104,7 @@ class JwtClient:
         if not self.refresh:
             return False
         url = f"{self.base_url}/api/users/auth/refresh/"
-        r = requests.post(url, json={"refresh": self.refresh}, timeout=30)
+        r = self._session.post(url, json={"refresh": self.refresh}, timeout=30)
         if r.status_code != 200:
             return False
         data = r.json()
@@ -123,14 +129,21 @@ class JwtClient:
         json_body: dict | None = None,
         params: dict[str, Any] | None = None,
         retry_refresh: bool = True,
+        timeout: float | tuple[float, float] | None = None,
     ) -> Any:
         if not self.access:
             raise ApiError("Нет access-токена", status_code=401)
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {self.access}"}
         merged_params = {**self.branch_params(), **(params or {})}
-        r = requests.request(
-            method, url, json=json_body, headers=headers, params=merged_params or None, timeout=60
+        to = 60 if timeout is None else timeout
+        r = self._session.request(
+            method,
+            url,
+            json=json_body,
+            headers=headers,
+            params=merged_params or None,
+            timeout=to,
         )
         if r.status_code == 401 and retry_refresh and self.refresh:
             if self.refresh_access():
@@ -233,7 +246,12 @@ class JwtClient:
         body: dict[str, Any] = {"barcode": barcode.strip()}
         if quantity is not None:
             body["quantity"] = quantity
-        return self._request("POST", f"/api/main/pos/sales/{cart_id}/scan/", json_body=body)
+        return self._request(
+            "POST",
+            f"/api/main/pos/sales/{cart_id}/scan/",
+            json_body=body,
+            timeout=(5, 45),
+        )
 
     def pos_add_item(
         self,
