@@ -70,11 +70,62 @@ def _money(v: Any) -> str:
         return str(v) if v is not None else "0.00"
 
 
+def _first_nonempty_str(*vals: Any) -> str | None:
+    for v in vals:
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip():
+            return v
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            s = str(v)
+            if s.strip():
+                return s
+    return None
+
+
+def _name_from_product_dict(p: dict[str, Any]) -> str | None:
+    if not p:
+        return None
+    return _first_nonempty_str(
+        p.get("name"),
+        p.get("title"),
+        p.get("display_name"),
+        p.get("name_ru"),
+        p.get("title_ru"),
+        p.get("full_name"),
+        p.get("label"),
+    )
+
+
 def _item_name(it: dict[str, Any]) -> str:
     p = it.get("product")
     if isinstance(p, dict):
-        return str(p.get("name") or p.get("title") or "—")
-    return str(it.get("product_name") or it.get("name") or "—")
+        n = _name_from_product_dict(p)
+        if n:
+            return n
+    snap = it.get("product_snapshot")
+    if isinstance(snap, dict):
+        n = _name_from_product_dict(snap)
+        if n:
+            return n
+    for k in (
+        "product_name",
+        "name",
+        "title",
+        "display_name",
+        "label",
+        "item_name",
+        "description",
+    ):
+        v = it.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    pid = it.get("product_id")
+    if pid is None and p is not None and not isinstance(p, dict):
+        pid = p
+    if pid is not None and str(pid).strip():
+        return f"Товар #{pid}"
+    return "—"
 
 
 def _item_id(it: dict[str, Any]) -> str | None:
@@ -317,9 +368,15 @@ MIN_BARCODE_LEN = 4
 BARCODE_LIKE_MIN_DIGITS = 8
 LIVE_SEARCH_DEBOUNCE_SEC = 0.28
 
-# NUR CRM: светлый контент, акцент #f7d617, тёмный сайдбар
+# NUR CRM: три колонки, тёмный бренд-бар сверху, акцент #f7d617
 UI_BRAND = "#f7d617"
-UI_BG = "#f0f2f5"
+UI_BG = "#f5f5f5"
+_COLUMN_CARD_SHADOW = ft.BoxShadow(
+    blur_radius=15,
+    spread_radius=1,
+    color=ft.Colors.with_opacity(0.12, "#000000"),
+    offset=ft.Offset(0, 4),
+)
 UI_SIDEBAR = "#111827"
 UI_SIDEBAR_MUTED = "#9ca3af"
 UI_SIDEBAR_TEXT = "#e5e7eb"
@@ -461,7 +518,7 @@ def main(page: ft.Page):
     error_text = ft.Ref[ft.Text]()
     loading_overlay = ft.Ref[ft.Container]()
     shift_banner = ft.Ref[ft.Container]()
-    cart_items_col = ft.Ref[ft.Column]()
+    cart_items_col = ft.Ref[ft.ListView]()
     subtotal_txt = ft.Ref[ft.Text]()
     discount_txt = ft.Ref[ft.Text]()
     total_txt = ft.Ref[ft.Text]()
@@ -712,10 +769,12 @@ def main(page: ft.Page):
         if not items:
             col.controls.append(
                 ft.Container(
+                    width=float("inf"),
                     content=ft.Text(
                         "Нет позиций — отсканируйте штрихкод или добавьте товар из поиска",
                         color=UI_MUTED,
                         size=14,
+                        text_align=ft.TextAlign.CENTER,
                     ),
                     padding=ft.Padding.symmetric(vertical=24, horizontal=8),
                     alignment=ft.Alignment.CENTER,
@@ -732,13 +791,33 @@ def main(page: ft.Page):
                 qty = str(it.get("quantity", "1"))
                 line = _item_line_total(it)
                 disc_line = _item_discount_display(it)
+                _icon_btn_style = ft.ButtonStyle(
+                    padding=ft.Padding.symmetric(horizontal=2, vertical=2),
+                )
                 sub_lines = [
-                    ft.Text(name, size=14, weight=ft.FontWeight.W_500, color=UI_TEXT),
-                    ft.Text(f"{qty} × {_money(it.get('unit_price'))}", size=12, color=UI_MUTED),
+                    ft.Text(
+                        name,
+                        size=14,
+                        weight=ft.FontWeight.W_500,
+                        color=UI_TEXT,
+                        max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    ft.Text(
+                        f"{qty} × {_money(it.get('unit_price'))} сом",
+                        size=12,
+                        color=UI_MUTED,
+                        no_wrap=True,
+                    ),
                 ]
                 if disc_line:
                     sub_lines.append(
-                        ft.Text(f"Скидка на строку: {disc_line} сом", size=11, color=UI_WARN_TEXT),
+                        ft.Text(
+                            f"Скидка: {disc_line} сом",
+                            size=11,
+                            color=UI_WARN_TEXT,
+                            no_wrap=True,
+                        ),
                     )
 
                 def qty_patch(delta: float, item=it, item_id=iid):
@@ -774,52 +853,73 @@ def main(page: ft.Page):
 
                 col.controls.append(
                     ft.Container(
+                        width=float("inf"),
                         content=ft.Row(
                             [
                                 ft.Container(
-                                    content=ft.Column(sub_lines, spacing=2, expand=True),
+                                    content=ft.Column(
+                                        sub_lines,
+                                        spacing=2,
+                                        horizontal_alignment=ft.CrossAxisAlignment.START,
+                                    ),
                                     expand=True,
                                 ),
-                                ft.Text(
-                                    f"{line} сом",
-                                    size=15,
-                                    weight=ft.FontWeight.W_600,
-                                    color=UI_TEXT,
-                                    width=110,
-                                    text_align=ft.TextAlign.RIGHT,
-                                    no_wrap=True,
-                                ),
-                                ft.IconButton(
-                                    ft.Icons.EDIT_NOTE,
-                                    tooltip="Цена и скидка строки",
-                                    icon_color=UI_MUTED,
-                                    on_click=lambda e, row=it, rid=iid: open_line_item_edit(row, rid),
-                                ),
-                                ft.IconButton(
-                                    ft.Icons.REMOVE,
-                                    tooltip="−1",
-                                    icon_color=UI_MUTED,
-                                    on_click=lambda e, d=-1: qty_patch(d),
-                                ),
-                                ft.IconButton(
-                                    ft.Icons.ADD,
-                                    tooltip="+1",
-                                    icon_color=UI_ACCENT,
-                                    on_click=lambda e, d=1: qty_patch(d),
-                                ),
-                                ft.IconButton(
-                                    ft.Icons.DELETE_OUTLINE,
-                                    tooltip="Удалить",
-                                    icon_color=UI_MUTED,
-                                    on_click=lambda e: remove_item(),
+                                ft.Row(
+                                    [
+                                        ft.Text(
+                                            f"{line} сом",
+                                            size=15,
+                                            weight=ft.FontWeight.W_600,
+                                            color=UI_TEXT,
+                                            width=100,
+                                            text_align=ft.TextAlign.RIGHT,
+                                            no_wrap=True,
+                                        ),
+                                        ft.IconButton(
+                                            ft.Icons.EDIT_NOTE,
+                                            tooltip="Цена и скидка строки",
+                                            icon_color=UI_MUTED,
+                                            icon_size=20,
+                                            style=_icon_btn_style,
+                                            on_click=lambda e, row=it, rid=iid: open_line_item_edit(row, rid),
+                                        ),
+                                        ft.IconButton(
+                                            ft.Icons.REMOVE,
+                                            tooltip="−1",
+                                            icon_color=UI_MUTED,
+                                            icon_size=20,
+                                            style=_icon_btn_style,
+                                            on_click=lambda e, d=-1: qty_patch(d),
+                                        ),
+                                        ft.IconButton(
+                                            ft.Icons.ADD,
+                                            tooltip="+1",
+                                            icon_color=UI_ACCENT,
+                                            icon_size=20,
+                                            style=_icon_btn_style,
+                                            on_click=lambda e, d=1: qty_patch(d),
+                                        ),
+                                        ft.IconButton(
+                                            ft.Icons.DELETE_OUTLINE,
+                                            tooltip="Удалить",
+                                            icon_color=UI_MUTED,
+                                            icon_size=20,
+                                            style=_icon_btn_style,
+                                            on_click=lambda e: remove_item(),
+                                        ),
+                                    ],
+                                    spacing=0,
+                                    tight=True,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                 ),
                             ],
-                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                            alignment=ft.MainAxisAlignment.START,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
-                        padding=ft.Padding.symmetric(vertical=10, horizontal=12),
-                        margin=ft.Margin.only(bottom=8),
+                        padding=ft.Padding.symmetric(vertical=8, horizontal=10),
+                        margin=ft.Margin.only(bottom=6),
                         bgcolor=UI_SURFACE_ELEV,
-                        border_radius=10,
+                        border_radius=12,
                         border=ft.Border.all(1, UI_BORDER),
                     )
                 )
@@ -994,18 +1094,25 @@ def main(page: ft.Page):
                 add_product_by_id(product_id)
 
             col.controls.append(
-                ft.Container(
-                    content=ft.ListTile(
-                        title=ft.Text(title, size=14, color=UI_TEXT),
-                        subtitle=ft.Text(f"{price} сом", size=12, color=UI_ACCENT),
-                        dense=True,
-                        on_click=on_pick,
-                        hover_color=ft.Colors.with_opacity(0.08, "#111827"),
+                ft.ListTile(
+                    title=ft.Text(
+                        title,
+                        size=13,
+                        color=UI_TEXT,
+                        max_lines=2,
+                        overflow=ft.TextOverflow.ELLIPSIS,
                     ),
-                    bgcolor=UI_SURFACE_ELEV,
-                    border_radius=8,
-                    margin=ft.Margin.only(bottom=6),
-                    border=ft.Border.all(1, UI_BORDER),
+                    subtitle=ft.Text(
+                        f"{price} сом",
+                        size=12,
+                        color=UI_ACCENT,
+                        weight=ft.FontWeight.W_500,
+                        max_lines=1,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    dense=True,
+                    on_click=on_pick,
+                    hover_color=ft.Colors.with_opacity(0.06, "#111827"),
                 )
             )
 
@@ -1458,6 +1565,7 @@ def main(page: ft.Page):
         page.show_dialog(dlg)
 
     def build_login() -> ft.Column:
+        _login_field_fill = UI_SURFACE_ELEV
         email = ft.TextField(
             label="Email",
             value=TEST_LOGIN_EMAIL,
@@ -1466,6 +1574,9 @@ def main(page: ft.Page):
             autofocus=True,
             border_radius=8,
             filled=True,
+            border=ft.InputBorder.NONE,
+            bgcolor=_login_field_fill,
+            border_width=0,
             expand=True,
         )
         password = ft.TextField(
@@ -1475,6 +1586,9 @@ def main(page: ft.Page):
             can_reveal_password=True,
             border_radius=8,
             filled=True,
+            border=ft.InputBorder.NONE,
+            bgcolor=_login_field_fill,
+            border_width=0,
             expand=True,
             on_submit=lambda e: do_login(None),
         )
@@ -1502,73 +1616,85 @@ def main(page: ft.Page):
 
         api_hint = ft.Text(f"API: {API_BASE_URL}", size=11, color=UI_MUTED)
 
-        return ft.Column(
-            [
-                ft.Container(
-                    content=ft.Row(
-                        [
-                            ft.Container(
-                                width=5,
-                                border_radius=4,
-                                bgcolor=UI_ACCENT,
-                            ),
-                            ft.Container(
-                                content=ft.Column(
-                                    [
-                                        ft.Text(
-                                            "NUR MARKET",
-                                            size=12,
-                                            weight=ft.FontWeight.W_700,
-                                            color=UI_ACCENT,
-                                        ),
-                                        ft.Text("Вход кассира", size=26, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                                        ft.Text("Email и пароль от аккаунта", size=14, color=UI_MUTED),
-                                        ft.Container(height=22),
-                                        ft.Row([email], expand=True),
-                                        ft.Container(height=10),
-                                        ft.Row([password], expand=True),
-                                        ft.Text(ref=error_text, value="", color=ft.Colors.RED_400, visible=False),
-                                        ft.Container(height=18),
-                                        ft.FilledButton(
-                                            "Войти",
-                                            width=float("inf"),
-                                            height=50,
-                                            style=ft.ButtonStyle(
-                                                bgcolor=UI_ACCENT,
-                                                color=UI_TEXT_ON_YELLOW,
-                                                padding=ft.Padding.symmetric(vertical=14),
-                                                shape=ft.RoundedRectangleBorder(radius=10),
-                                            ),
-                                            on_click=do_login,
-                                        ),
-                                        ft.Container(height=14),
-                                        api_hint,
-                                    ],
-                                    tight=True,
-                                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        login_card = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(
+                        width=5,
+                        border_radius=4,
+                        bgcolor=UI_ACCENT,
+                    ),
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Text(
+                                    "NUR MARKET",
+                                    size=12,
+                                    weight=ft.FontWeight.W_700,
+                                    color=UI_ACCENT,
                                 ),
-                                padding=ft.Padding.only(left=28, right=36, top=36, bottom=36),
-                                expand=True,
-                            ),
-                        ],
-                        spacing=0,
+                                ft.Text("Вход кассира", size=26, weight=ft.FontWeight.W_600, color=UI_TEXT),
+                                ft.Text("Email и пароль от аккаунта", size=14, color=UI_MUTED),
+                                ft.Container(height=22),
+                                ft.Row([email], expand=True),
+                                ft.Container(height=10),
+                                ft.Row([password], expand=True),
+                                ft.Text(ref=error_text, value="", color=ft.Colors.RED_400, visible=False),
+                                ft.Container(height=18),
+                                ft.FilledButton(
+                                    "Войти",
+                                    width=float("inf"),
+                                    height=50,
+                                    style=ft.ButtonStyle(
+                                        bgcolor=UI_ACCENT,
+                                        color=UI_TEXT_ON_YELLOW,
+                                        padding=ft.Padding.symmetric(vertical=14),
+                                        shape=ft.RoundedRectangleBorder(radius=10),
+                                    ),
+                                    on_click=do_login,
+                                ),
+                                ft.Container(height=14),
+                                api_hint,
+                            ],
+                            tight=True,
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                        ),
+                        padding=ft.Padding.only(left=28, right=36, top=36, bottom=36),
                         expand=True,
                     ),
-                    width=440,
-                    bgcolor=UI_SURFACE,
-                    border_radius=18,
-                    border=ft.Border.all(1, UI_BORDER),
-                    shadow=ft.BoxShadow(
-                        blur_radius=24,
-                        spread_radius=0,
-                        color=ft.Colors.with_opacity(0.12, "#111827"),
-                        offset=ft.Offset(0, 8),
-                    ),
+                ],
+                spacing=0,
+                expand=True,
+            ),
+            width=440,
+            bgcolor=UI_SURFACE,
+            border_radius=18,
+            border=ft.Border.all(1, UI_BORDER),
+            shadow=ft.BoxShadow(
+                blur_radius=24,
+                spread_radius=0,
+                color=ft.Colors.with_opacity(0.12, "#111827"),
+                offset=ft.Offset(0, 8),
+            ),
+        )
+
+        return ft.Column(
+            [
+                ft.Container(expand=True),
+                ft.Row(
+                    [
+                        ft.Container(expand=True),
+                        login_card,
+                        ft.Container(expand=True),
+                    ],
+                    expand=False,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
+                ft.Container(expand=True),
             ],
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            spacing=0,
         )
 
     def open_cashier():
@@ -2141,128 +2267,95 @@ def main(page: ft.Page):
 
         scan_block = ft.Column(
             [
-                ft.Container(
-                    content=ft.Row(
-                        [
-                            ft.Container(
-                                width=40,
-                                height=40,
-                                bgcolor=UI_ICON_BADGE_BG,
-                                border_radius=10,
-                                alignment=ft.Alignment.CENTER,
-                                content=ft.Icon(ft.Icons.BARCODE_READER, size=22, color=UI_ACCENT_DIM),
-                            ),
-                            ft.Column(
-                                [
-                                    ft.Text("Сканер штрихкода", size=13, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                                    ft.Text(
-                                        "Глобально: символы подряд (пауза ≤ 0,28 с), Enter — добавить. "
-                                        "Поиск по названию отдельно; кириллица не уходит в штрихкод.",
-                                        size=12,
-                                        color=UI_MUTED,
-                                    ),
-                                ],
-                                spacing=4,
-                                expand=True,
-                                tight=True,
-                            ),
-                        ],
-                        vertical_alignment=ft.CrossAxisAlignment.START,
-                        spacing=12,
-                    ),
-                    padding=14,
-                    bgcolor=UI_SURFACE_ELEV,
-                    border_radius=12,
-                    border=ft.Border.all(1, UI_BORDER),
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.BARCODE_READER, size=18, color=UI_ACCENT_DIM),
+                        ft.Text(
+                            "Скан: символы подряд + Enter. Способ оплаты — в окне после «ОПЛАТИТЬ».",
+                            size=11,
+                            color=UI_MUTED,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                ft.Container(height=12),
                 search_row,
-                ft.Container(
-                    content=search_results,
-                    height=200,
-                    bgcolor=UI_SURFACE,
-                    border=ft.Border.all(1, UI_BORDER),
-                    border_radius=12,
-                    padding=8,
-                    visible=True,
-                ),
             ],
-            spacing=0,
+            spacing=8,
         )
 
-        cart_col = ft.Column(
+        search_list_panel = ft.Container(
+            content=search_results,
+            expand=True,
+            bgcolor=UI_SURFACE_ELEV,
+            border=ft.Border.all(1, UI_BORDER),
+            border_radius=15,
+            padding=4,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
+
+        cart_col = ft.ListView(
             ref=cart_items_col,
+            expand=True,
             spacing=0,
-            scroll=ft.ScrollMode.AUTO,
-            expand=True,
-        )
-
-        positions_block = ft.Container(
-            content=ft.Column(
-                [
-                    ft.Text(
-                        "Позиции чека",
-                        size=13,
-                        weight=ft.FontWeight.W_600,
-                        color=UI_MUTED,
-                    ),
-                    ft.Container(
-                        content=cart_col,
-                        expand=True,
-                        bgcolor=UI_SURFACE,
-                        border=ft.Border.all(1, UI_BORDER),
-                        border_radius=14,
-                        padding=12,
-                        clip_behavior=ft.ClipBehavior.HARD_EDGE,
-                    ),
-                ],
-                expand=True,
-                spacing=8,
-            ),
-            expand=True,
+            padding=ft.Padding.symmetric(horizontal=0, vertical=2),
         )
 
         receipt = ft.Container(
             content=ft.Column(
                 [
-                    ft.Text("Итог", size=18, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                    ft.Text(ref=status_chip, value="—", size=12, color=UI_MUTED),
+                    ft.Text("Оплата", size=11, weight=ft.FontWeight.W_600, color=UI_MUTED),
+                    ft.Text(ref=status_chip, value="—", size=10, color=UI_MUTED),
                     ft.Divider(height=1, color=UI_BORDER),
                     ft.Row(
                         [
-                            ft.Text("Подытог:", size=13, color=UI_MUTED),
-                            ft.Text(ref=subtotal_txt, value="0.00 сом", color=UI_TEXT),
+                            ft.Text("Подытог", size=12, color=UI_MUTED),
+                            ft.Text(ref=subtotal_txt, value="0.00 сом", size=12, color=UI_TEXT),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     ),
                     ft.Row(
                         [
-                            ft.Text("Скидка:", size=13, color=UI_MUTED),
-                            ft.Text(ref=discount_txt, value="0.00 сом", color=UI_TEXT),
+                            ft.Text("Скидка", size=12, color=UI_MUTED),
+                            ft.Text(ref=discount_txt, value="0.00 сом", size=12, color=UI_TEXT),
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     ),
-                    ft.Row(
-                        [
-                            ft.Text("Итого:", size=18, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                            ft.Text(
-                                ref=total_txt,
-                                value="0.00 сом",
-                                size=22,
-                                weight=ft.FontWeight.W_700,
-                                color=UI_ACCENT,
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Text(
+                                    "К оплате",
+                                    size=11,
+                                    weight=ft.FontWeight.W_600,
+                                    color=UI_MUTED,
+                                ),
+                                ft.Text(
+                                    ref=total_txt,
+                                    value="0.00 сом",
+                                    size=28,
+                                    weight=ft.FontWeight.W_800,
+                                    color=UI_ACCENT,
+                                ),
+                            ],
+                            spacing=4,
+                            tight=True,
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        padding=ft.Padding.symmetric(horizontal=12, vertical=14),
+                        bgcolor=UI_ICON_BADGE_BG,
+                        border_radius=15,
+                        border=ft.Border.all(1, UI_BORDER),
                     ),
                     ft.Divider(height=1, color=UI_BORDER),
-                    ft.Text("Скидка на чек", size=12, color=UI_TEXT),
-                    ft.Text("Укажите либо %, либо сумму — не оба сразу", size=10, color=UI_MUTED),
+                    ft.Text("Скидка на чек", size=11, color=UI_TEXT),
+                    ft.Text("% или сумма", size=9, color=UI_MUTED),
                     ft.Row(
                         [
                             ft.TextField(
                                 ref=order_discount_pct_ref,
-                                label="% на чек",
+                                label="%",
                                 hint_text="10",
                                 dense=True,
                                 expand=True,
@@ -2270,19 +2363,19 @@ def main(page: ft.Page):
                             ),
                             ft.TextField(
                                 ref=order_discount_sum_ref,
-                                label="Сумма скидки",
-                                hint_text="50.00",
+                                label="Сумма",
+                                hint_text="50",
                                 dense=True,
                                 expand=True,
                                 on_submit=apply_order_discount,
                             ),
                         ],
-                        spacing=8,
+                        spacing=6,
                     ),
                     ft.Row(
                         [
                             ft.OutlinedButton(
-                                "Применить на чек",
+                                "Применить",
                                 icon=ft.Icons.DISCOUNT,
                                 on_click=apply_order_discount,
                                 expand=True,
@@ -2290,52 +2383,34 @@ def main(page: ft.Page):
                         ],
                     ),
                     ft.TextButton(
-                        "Сбросить скидку на чек",
+                        "Сбросить скидку",
                         icon=ft.Icons.CLEAR,
                         icon_color=UI_MUTED,
                         style=ft.ButtonStyle(color=UI_MUTED),
                         on_click=clear_order_discount,
                     ),
-                    ft.Container(height=12),
+                    ft.Container(expand=True),
                     ft.FilledButton(
-                        "Оплата",
+                        "ОПЛАТИТЬ",
                         icon=ft.Icons.PAYMENTS,
                         style=ft.ButtonStyle(
                             bgcolor=UI_ACCENT,
                             color=UI_TEXT_ON_YELLOW,
-                            shape=ft.RoundedRectangleBorder(radius=12),
+                            shape=ft.RoundedRectangleBorder(radius=15),
                         ),
                         on_click=checkout_click,
                         width=float("inf"),
-                        height=52,
+                        height=56,
                     ),
                 ],
-                tight=True,
-            ),
-            padding=22,
-            bgcolor=UI_SURFACE,
-            border_radius=16,
-            border=ft.Border.all(1, UI_BORDER),
-            shadow=ft.BoxShadow(
-                blur_radius=16,
-                color=ft.Colors.with_opacity(0.1, "#111827"),
-                offset=ft.Offset(0, 4),
-            ),
-        )
-
-        right_column = ft.Container(
-            content=ft.Column(
-                [
-                    positions_block,
-                    receipt,
-                ],
                 expand=True,
-                spacing=12,
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                spacing=6,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
-            expand=True,
-            margin=ft.Margin.only(right=10, top=10, bottom=10),
+            padding=14,
+            bgcolor=UI_SURFACE,
+            border_radius=15,
+            border=ft.Border.all(1, UI_BORDER),
         )
 
         scale_weight_panel = None
@@ -2345,95 +2420,98 @@ def main(page: ft.Page):
                     [
                         ft.Row(
                             [
-                                ft.Icon(ft.Icons.SCALE_OUTLINED, color=UI_ACCENT_DIM),
-                                ft.Text("Весы (COM)", size=13, weight=ft.FontWeight.W_600, color=UI_TEXT),
+                                ft.Icon(ft.Icons.SCALE_OUTLINED, size=16, color=UI_ACCENT_DIM),
+                                ft.Text(
+                                    "Весы",
+                                    size=11,
+                                    weight=ft.FontWeight.W_600,
+                                    color=UI_MUTED,
+                                ),
+                                ft.Container(expand=True),
+                                ft.IconButton(
+                                    ft.Icons.PRINT_OUTLINED,
+                                    tooltip="Печать веса на LPT",
+                                    icon_color=UI_ACCENT_DIM,
+                                    style=ft.ButtonStyle(bgcolor=UI_SURFACE),
+                                    on_click=on_print_weight_click,
+                                ),
                             ],
-                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
-                        ft.Text(ref=weight_scale_text, value="—", size=22, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                        ft.Text(ref=weight_scale_status, value="", size=11, color=UI_MUTED),
-                        ft.FilledButton(
-                            "Печать веса на LPT",
-                            icon=ft.Icons.PRINT_OUTLINED,
-                            style=ft.ButtonStyle(bgcolor=UI_ACCENT, color=UI_TEXT_ON_YELLOW),
-                            on_click=on_print_weight_click,
-                        ),
+                        ft.Text(ref=weight_scale_text, value="—", size=20, weight=ft.FontWeight.W_600, color=UI_TEXT),
+                        ft.Text(ref=weight_scale_status, value="", size=9, color=UI_MUTED),
                     ],
                     tight=True,
-                    spacing=8,
+                    spacing=4,
                 ),
-                padding=14,
+                padding=10,
                 bgcolor=UI_SURFACE_ELEV,
                 border_radius=12,
                 border=ft.Border.all(1, UI_BORDER),
             )
 
-        products_children: list = [
-            _section_heading("Продажа", "Поиск и скан по товарам"),
-            banner,
-            ft.Container(height=10),
-        ]
+        col_left_children: list = [banner]
         if scale_weight_panel is not None:
-            products_children.append(scale_weight_panel)
-            products_children.append(ft.Container(height=10))
-        products_children.append(scan_block)
-
-        products_area = ft.Container(
-            content=ft.Column(
-                products_children,
-                expand=True,
-            ),
-            padding=22,
-            expand=True,
-            bgcolor=UI_SURFACE,
-            border_radius=16,
-            border=ft.Border.all(1, UI_BORDER),
-            margin=ft.Margin.only(right=10, bottom=10, top=10, left=8),
+            col_left_children.append(scale_weight_panel)
+        col_left_children.extend(
+            [
+                ft.Text("Поиск товаров", size=11, weight=ft.FontWeight.W_600, color=UI_MUTED),
+                scan_block,
+                search_list_panel,
+            ]
         )
 
-        sidebar = ft.Container(
-            width=220,
-            bgcolor=UI_SIDEBAR,
-            padding=ft.Padding.only(top=20, bottom=24, left=14, right=12),
+        col_left = ft.Container(
             content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Container(
-                                width=44,
-                                height=44,
-                                bgcolor=UI_ACCENT,
-                                border_radius=12,
-                                alignment=ft.Alignment.CENTER,
-                                content=ft.Icon(
-                                    ft.Icons.STOREFRONT_OUTLINED,
-                                    color=UI_TEXT_ON_YELLOW,
-                                    size=26,
-                                ),
-                            ),
-                            ft.Column(
-                                [
-                                    ft.Text("NUR", size=10, weight=ft.FontWeight.W_700, color=UI_SIDEBAR_MUTED),
-                                    ft.Text("MARKET", size=15, weight=ft.FontWeight.W_700, color=UI_SIDEBAR_TEXT),
-                                ],
-                                spacing=0,
-                                tight=True,
-                            ),
-                        ],
-                        spacing=12,
-                    ),
-                    ft.Container(height=28),
-                    _sidebar_nav_item(ft.Icons.POINT_OF_SALE, "Касса", active=True),
-                    ft.Container(height=4),
-                    _sidebar_nav_item(ft.Icons.SHOPPING_CART_OUTLINED, "Продажа", active=False),
-                    ft.Container(height=4),
-                    _sidebar_nav_item(ft.Icons.RECEIPT_LONG_OUTLINED, "Чек", active=False),
-                    ft.Container(expand=True),
-                    ft.Text("Касса POS", size=11, color=UI_SIDEBAR_MUTED),
-                ],
+                col_left_children,
                 expand=True,
+                spacing=8,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
+            expand=True,
+            padding=12,
+            bgcolor=UI_SURFACE,
+            border_radius=15,
+            border=ft.Border.all(1, UI_BORDER),
+            shadow=_COLUMN_CARD_SHADOW,
+        )
+
+        col_mid = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "Текущий чек",
+                        size=11,
+                        weight=ft.FontWeight.W_600,
+                        color=UI_MUTED,
+                    ),
+                    ft.Container(
+                        content=cart_col,
+                        expand=True,
+                        bgcolor=UI_SURFACE_ELEV,
+                        border=ft.Border.all(1, UI_BORDER),
+                        border_radius=15,
+                        padding=8,
+                        clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                    ),
+                ],
+                expand=True,
+                spacing=8,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+            expand=True,
+            padding=12,
+            bgcolor=UI_SURFACE,
+            border_radius=15,
+            border=ft.Border.all(1, UI_BORDER),
+            shadow=_COLUMN_CARD_SHADOW,
+        )
+
+        col_pay = ft.Container(
+            content=receipt,
+            expand=True,
+            padding=0,
+            shadow=_COLUMN_CARD_SHADOW,
         )
 
         _hdr_btns: list[ft.Control] = [
@@ -2491,72 +2569,133 @@ def main(page: ft.Page):
         )
         header_toolbar = ft.Row(_hdr_btns, spacing=8, tight=True)
 
+        company_short = (str(company)[:28] + "…") if len(str(company)) > 30 else str(company)
+        header_left = ft.Row(
+            [
+                ft.Text(
+                    "NUR · Касса",
+                    size=12,
+                    weight=ft.FontWeight.W_600,
+                    color=UI_MUTED,
+                ),
+                ft.Text(company_short, size=10, color=UI_MUTED),
+                branch_ctrl if branch_ctrl else ft.Container(),
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
         header = ft.Container(
-            content=ft.Column(
+            content=ft.Row(
                 [
-                    ft.Row(
+                    header_left,
+                    ft.Container(expand=True),
+                    ft.Column(
                         [
-                            ft.Column(
-                                [
-                                    ft.Text("Касса POS", size=22, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                                    ft.Text(company, size=13, color=UI_MUTED),
-                                ],
-                                spacing=2,
-                                expand=True,
-                            ),
-                            header_toolbar,
-                            ft.IconButton(
-                                ft.Icons.LOGOUT,
-                                tooltip="Выйти из аккаунта",
-                                icon_color=UI_MUTED,
-                                style=ft.ButtonStyle(bgcolor=UI_SURFACE_ELEV),
-                                on_click=logout,
+                            ft.Text(name, size=9, color=UI_MUTED, text_align=ft.TextAlign.RIGHT),
+                            ft.Text(role, size=9, color=UI_MUTED, text_align=ft.TextAlign.RIGHT),
+                            ft.Text(
+                                f"Филиал: {branch_label[:18]}…"
+                                if len(str(branch_label)) > 20
+                                else f"Филиал: {branch_label}",
+                                size=9,
+                                color=UI_MUTED,
+                                text_align=ft.TextAlign.RIGHT,
                             ),
                         ],
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=0,
+                        tight=True,
+                        horizontal_alignment=ft.CrossAxisAlignment.END,
                     ),
-                    ft.Row(
-                        [
-                            branch_ctrl if branch_ctrl else ft.Container(),
-                            ft.Container(expand=True),
-                            ft.Column(
-                                [
-                                    ft.Text(name, size=14, weight=ft.FontWeight.W_500, text_align=ft.TextAlign.RIGHT, color=UI_TEXT),
-                                    ft.Text(role, size=12, color=UI_MUTED, text_align=ft.TextAlign.RIGHT),
-                                    ft.Text(
-                                        f"Филиал: {branch_label[:20]}…"
-                                        if len(branch_label) > 22
-                                        else f"Филиал: {branch_label}",
-                                        size=11,
-                                        color=UI_MUTED,
-                                        text_align=ft.TextAlign.RIGHT,
-                                    ),
-                                ],
-                                spacing=2,
-                                horizontal_alignment=ft.CrossAxisAlignment.END,
-                            ),
-                        ],
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    header_toolbar,
+                    ft.IconButton(
+                        ft.Icons.LOGOUT,
+                        tooltip="Выйти из аккаунта",
+                        icon_color=UI_MUTED,
+                        style=ft.ButtonStyle(bgcolor=UI_SURFACE_ELEV),
+                        on_click=logout,
                     ),
                 ],
-                spacing=10,
-                tight=True,
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            padding=ft.Padding.symmetric(horizontal=24, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
             bgcolor=UI_SURFACE,
             border=ft.Border.only(
-                bottom=ft.BorderSide(3, UI_ACCENT),
+                bottom=ft.BorderSide(1, UI_BORDER),
             ),
         )
 
-        main_row = ft.Row([products_area, right_column], expand=True, spacing=0)
-        main_stack = ft.Column([header, main_row], expand=True, spacing=0)
+        three_columns = ft.Row(
+            [col_left, col_mid, col_pay],
+            expand=True,
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        )
+        main_stack = ft.Column(
+            [
+                header,
+                ft.Container(
+                    content=three_columns,
+                    expand=True,
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=10),
+                    bgcolor=UI_BG,
+                ),
+            ],
+            expand=True,
+            spacing=0,
+        )
+
+        top_brand_bar = ft.Container(
+            height=52,
+            bgcolor=UI_SIDEBAR,
+            padding=ft.Padding.symmetric(horizontal=14, vertical=6),
+            content=ft.Row(
+                [
+                    ft.Container(
+                        width=40,
+                        height=40,
+                        bgcolor=UI_ACCENT,
+                        border_radius=10,
+                        alignment=ft.Alignment.CENTER,
+                        content=ft.Icon(
+                            ft.Icons.STOREFRONT_OUTLINED,
+                            color=UI_TEXT_ON_YELLOW,
+                            size=22,
+                        ),
+                    ),
+                    ft.Container(width=12),
+                    ft.Column(
+                        [
+                            ft.Text(
+                                "NUR CRM",
+                                size=13,
+                                weight=ft.FontWeight.W_800,
+                                color=UI_SIDEBAR_TEXT,
+                                height=18,
+                            ),
+                            ft.Text(
+                                "Касса",
+                                size=10,
+                                weight=ft.FontWeight.W_500,
+                                color=UI_SIDEBAR_MUTED,
+                                height=14,
+                            ),
+                        ],
+                        spacing=0,
+                        tight=True,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                    ft.Container(expand=True),
+                ],
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
 
         return ft.Stack(
             [
-                ft.Row(
+                ft.Column(
                     [
-                        sidebar,
+                        top_brand_bar,
                         ft.Container(content=main_stack, expand=True, bgcolor=UI_BG),
                     ],
                     expand=True,
