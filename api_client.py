@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from config import API_BASE_URL
 
@@ -13,6 +15,13 @@ class ApiError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
+
+
+# После входа с другого устройства refresh часто отклоняется — показываем одно понятное сообщение.
+_AUTH_INVALID_HINT_RU = (
+    "Сессия недействительна (часто из‑за входа с другого ПК или телефона). "
+    "Нажмите «Выйти» в кассе и войдите снова."
+)
 
 
 def _parse_error(resp: requests.Response) -> str:
@@ -47,14 +56,23 @@ def unwrap_list(data: Any) -> list:
 
 
 class JwtClient:
+    @staticmethod
+    def _configure_session(s: requests.Session) -> None:
+        # Пул соединений: серия запросов (скан + обновление корзины) не открывает TCP заново на каждый вызов.
+        adapter = HTTPAdapter(pool_connections=12, pool_maxsize=12, max_retries=0)
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)
+
     def __init__(self, base_url: str = API_BASE_URL):
         self.base_url = base_url
         self.access: str | None = None
         self.refresh: str | None = None
         self.user_payload: dict[str, Any] = {}
         self.active_branch_id: str | None = None
-        # Одно TCP/TLS-соединение с API (keep-alive) — заметно быстрее серии запросов, чем requests.request каждый раз.
         self._session = requests.Session()
+        self._configure_session(self._session)
+        # Session не потокобезопасен; запросы из asyncio.to_thread обязаны сериализоваться.
+        self._http_lock = threading.RLock()
 
     def set_tokens(self, access: str, refresh: str | None, user_payload: dict[str, Any] | None = None):
         self.access = access
@@ -77,40 +95,46 @@ class JwtClient:
         return {}
 
     def clear(self):
-        self.access = None
-        self.refresh = None
-        self.user_payload = {}
-        self.active_branch_id = None
-        self._session.close()
-        self._session = requests.Session()
+        with self._http_lock:
+            self.access = None
+            self.refresh = None
+            self.user_payload = {}
+            self.active_branch_id = None
+            self._session.close()
+            self._session = requests.Session()
+            self._configure_session(self._session)
 
     def login(self, email: str, password: str) -> dict[str, Any]:
         url = f"{self.base_url}/api/users/auth/login/"
-        r = self._session.post(
-            url, json={"email": email.strip(), "password": password}, timeout=30
-        )
-        if r.status_code != 200:
-            raise ApiError(_parse_error(r), status_code=r.status_code, payload=self._safe_json(r))
-        data = r.json()
-        self.set_tokens(
-            data.get("access"),
-            data.get("refresh"),
-            {k: v for k, v in data.items() if k not in ("access", "refresh")},
-        )
-        self.sync_branch_from_user()
-        return data
+        with self._http_lock:
+            r = self._session.post(
+                url, json={"email": email.strip(), "password": password}, timeout=30
+            )
+            if r.status_code != 200:
+                raise ApiError(
+                    _parse_error(r), status_code=r.status_code, payload=self._safe_json(r)
+                )
+            data = r.json()
+            self.set_tokens(
+                data.get("access"),
+                data.get("refresh"),
+                {k: v for k, v in data.items() if k not in ("access", "refresh")},
+            )
+            self.sync_branch_from_user()
+            return data
 
     def refresh_access(self) -> bool:
-        if not self.refresh:
-            return False
-        url = f"{self.base_url}/api/users/auth/refresh/"
-        r = self._session.post(url, json={"refresh": self.refresh}, timeout=30)
-        if r.status_code != 200:
-            return False
-        data = r.json()
-        if "access" in data:
-            self.access = data["access"]
-        return True
+        with self._http_lock:
+            if not self.refresh:
+                return False
+            url = f"{self.base_url}/api/users/auth/refresh/"
+            r = self._session.post(url, json={"refresh": self.refresh}, timeout=30)
+            if r.status_code != 200:
+                return False
+            data = r.json()
+            if "access" in data:
+                self.access = data["access"]
+            return True
 
     def get_profile(self) -> dict[str, Any]:
         return self._request("GET", "/api/users/profile/")
@@ -132,30 +156,40 @@ class JwtClient:
         timeout: float | tuple[float, float] | None = None,
     ) -> Any:
         if not self.access:
-            raise ApiError("Нет access-токена", status_code=401)
+            raise ApiError(_AUTH_INVALID_HINT_RU, status_code=401)
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {self.access}"}
         merged_params = {**self.branch_params(), **(params or {})}
-        to = 60 if timeout is None else timeout
-        r = self._session.request(
-            method,
-            url,
-            json=json_body,
-            headers=headers,
-            params=merged_params or None,
-            timeout=to,
-        )
-        if r.status_code == 401 and retry_refresh and self.refresh:
-            if self.refresh_access():
-                return self._request(method, path, json_body=json_body, params=params, retry_refresh=False)
-        if r.status_code >= 400:
-            raise ApiError(_parse_error(r), status_code=r.status_code, payload=self._safe_json(r))
-        if not r.content:
-            return {}
-        try:
-            return r.json()
-        except (json.JSONDecodeError, ValueError):
-            return {}
+        # Раздельный connect/read: быстрее отказ при «мёртвой» сети, без урезания времени чтения ответа.
+        to: float | tuple[float, float] = (6.0, 55.0) if timeout is None else timeout
+        with self._http_lock:
+            r = self._session.request(
+                method,
+                url,
+                json=json_body,
+                headers=headers,
+                params=merged_params or None,
+                timeout=to,
+            )
+            if r.status_code == 401 and retry_refresh and self.refresh:
+                if self.refresh_access():
+                    return self._request(
+                        method, path, json_body=json_body, params=params, retry_refresh=False
+                    )
+                self.clear()
+            elif r.status_code == 401 and not self.refresh:
+                self.clear()
+            if r.status_code >= 400:
+                msg = _parse_error(r)
+                if r.status_code == 401:
+                    msg = _AUTH_INVALID_HINT_RU
+                raise ApiError(msg, status_code=r.status_code, payload=self._safe_json(r))
+            if not r.content:
+                return {}
+            try:
+                return r.json()
+            except (json.JSONDecodeError, ValueError):
+                return {}
 
     # --- construction: смены и кассы ---
 
@@ -250,7 +284,8 @@ class JwtClient:
             "POST",
             f"/api/main/pos/sales/{cart_id}/scan/",
             json_body=body,
-            timeout=(5, 45),
+            # Короткий connect, умеренный read — быстрее отказ при обрыве; keep-alive в Session.
+            timeout=(4, 32),
         )
 
     def pos_add_item(
@@ -268,7 +303,12 @@ class JwtClient:
             body["unit_price"] = unit_price
         if discount_total is not None:
             body["discount_total"] = discount_total
-        return self._request("POST", f"/api/main/pos/sales/{cart_id}/add-item/", json_body=body)
+        return self._request(
+            "POST",
+            f"/api/main/pos/sales/{cart_id}/add-item/",
+            json_body=body,
+            timeout=(5, 45),
+        )
 
     def pos_cart_item_patch(self, cart_id: str, item_id: str, body: dict[str, Any]) -> dict[str, Any]:
         return self._request("PATCH", f"/api/main/pos/carts/{cart_id}/items/{item_id}/", json_body=body)
@@ -287,9 +327,10 @@ class JwtClient:
             f"/api/main/pos/carts/{cart_id}/checkout/",
         ]
         last_404: ApiError | None = None
+        checkout_to = (8.0, 90.0)
         for path in paths:
             try:
-                return self._request("POST", path, json_body=body)
+                return self._request("POST", path, json_body=body, timeout=checkout_to)
             except ApiError as e:
                 if e.status_code == 404:
                     last_404 = e
@@ -301,7 +342,7 @@ class JwtClient:
                 ):
                     try:
                         retry_body = {**body, "cash_received": "0.00"}
-                        return self._request("POST", path, json_body=retry_body)
+                        return self._request("POST", path, json_body=retry_body, timeout=checkout_to)
                     except ApiError:
                         raise e
                 raise e

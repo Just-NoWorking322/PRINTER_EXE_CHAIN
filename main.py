@@ -361,12 +361,13 @@ def _fetch_receipt_text_via_api(client: JwtClient, sale_id: Any) -> str | None:
     return _receipt_text_from_sale_receipt_api(r)
 
 
-# Глобальный сканер: пауза между символами больше — начинаем новый штрих (ручной ввод цифр в поиске).
-BARCODE_INTERKEY_RESET_MS = 280
+# Сканер HID: между символами обычно < 50 ms; пауза больше порога — новый штрих (не сливаем два скана).
+BARCODE_INTERKEY_RESET_MS = 85
+BARCODE_BUFFER_MAX_LEN = 64
 MIN_BARCODE_LEN = 4
-# Поле поиска: не запускать живой поиск по API, пока введена длинная «только цифры» (сканер печатает в фокус).
+# Поле поиска: не дергать живой поиск по длинной строке «только цифры» (сканер в фокусе поля).
 BARCODE_LIKE_MIN_DIGITS = 8
-LIVE_SEARCH_DEBOUNCE_SEC = 0.28
+LIVE_SEARCH_DEBOUNCE_SEC = 0.22
 
 # NUR CRM: три колонки, тёмный бренд-бар сверху, акцент #f7d617
 UI_BRAND = "#f7d617"
@@ -440,7 +441,7 @@ def _sidebar_nav_item(icon, label: str, *, active: bool = False) -> ft.Container
 
 
 def _key_to_barcode_char(key: str) -> str | None:
-    """Только символы типичного штрихкода; кириллица не попадает в буфер."""
+    """Символы штрихкода из события клавиатуры (Windows/macOS/web-имена клавиш)."""
     if not key:
         return None
     k = key.strip()
@@ -457,12 +458,26 @@ def _key_to_barcode_char(key: str) -> str | None:
         return None
     if k in ("Enter", "Return", "NumpadEnter", "Select"):
         return None
-    if k.startswith("Digit") and len(k) >= 6 and k[-1].isdigit():
-        return k[-1]
+    if k.startswith("Digit") and len(k) >= 6:
+        last = k[-1]
+        if last.isdigit():
+            return last
+    if k.startswith("Key") and len(k) == 4:
+        c = k[3]
+        if c.isdigit():
+            return c
+        if c.isalpha() and "A" <= c.upper() <= "Z":
+            return c.lower()
     if "Numpad" in k:
         tail = re.sub(r"\D", "", k)
         if tail:
             return tail[-1]
+    if k in ("Minus", "NumpadSubtract"):
+        return "-"
+    if k in ("Period", "NumpadDecimal"):
+        return "."
+    if k == "Space":
+        return " "
     return None
 
 
@@ -474,6 +489,58 @@ def _looks_like_barcode_query(q: str) -> bool:
 def _is_enter_key(key: str) -> bool:
     k = (key or "").strip()
     return k in ("Enter", "Return", "NumpadEnter", "Select")
+
+
+def _windows_pre_ui_init() -> None:
+    """
+    Вызывать до ft.run: DPI awareness на Windows (чёткие шрифты при масштабе экрана ≠ 100%%).
+    Опционально: winmm timeBeginPeriod(1) — чуть ровнее таймеры UI (DESKTOP_MARKET_WIN_MM_TIMER=1).
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+    except ImportError:
+        return
+    user32 = ctypes.windll.user32
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (HANDLE)-4
+        user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        shcore = getattr(ctypes.windll, "shcore", None)
+        if shcore is not None:
+            try:
+                shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            except Exception:
+                try:
+                    user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+        else:
+            try:
+                user32.SetProcessDPIAware()
+            except Exception:
+                pass
+    if os.environ.get("DESKTOP_MARKET_WIN_MM_TIMER", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        try:
+            ctypes.windll.winmm.timeBeginPeriod(1)
+
+            def _winmm_time_end():
+                try:
+                    ctypes.windll.winmm.timeEndPeriod(1)
+                except Exception:
+                    pass
+
+            import atexit
+
+            atexit.register(_winmm_time_end)
+        except Exception:
+            pass
 
 
 def main(page: ft.Page):
@@ -549,6 +616,46 @@ def main(page: ft.Page):
         page.snack_bar = ft.SnackBar(ft.Text(msg), bgcolor=color)
         page.snack_bar.open = True
         page.update()
+
+    def _cart_from_patch_response(data: Any) -> dict[str, Any] | None:
+        """Если PATCH вернул полную корзину — второй GET не нужен."""
+        if not isinstance(data, dict):
+            return None
+        nested = data.get("cart")
+        if isinstance(nested, dict) and nested.get("id") is not None:
+            if nested.get("items") is not None or nested.get("cart_items") is not None:
+                return nested
+        if data.get("id") is not None and (
+            data.get("items") is not None or data.get("cart_items") is not None
+        ):
+            return data
+        return None
+
+    def _apply_cart_from_response(data: Any) -> bool:
+        cart = _cart_from_patch_response(data)
+        if not cart:
+            return False
+        session["cart"] = cart
+        sid = _shift_id_from_cart(cart)
+        if sid:
+            session["active_shift_id"] = sid
+        render_cart_items()
+        return True
+
+    async def _reload_cart_async() -> None:
+        cid = session.get("cart_id")
+        if not cid:
+            return
+        try:
+            cart = await asyncio.to_thread(client.pos_cart_get, str(cid))
+        except ApiError as ex:
+            snack(str(ex), ft.Colors.RED_700)
+            return
+        session["cart"] = cart
+        sid = _shift_id_from_cart(cart)
+        if sid:
+            session["active_shift_id"] = sid
+        render_cart_items()
 
     def on_print_weight_click(_):
         mgr = scale_state.get("mgr")
@@ -627,34 +734,51 @@ def main(page: ft.Page):
         else:
             snack("Введите % или сумму скидки на чек", ft.Colors.AMBER_700)
             return
-        set_loading(True)
-        try:
-            client.pos_cart_patch(cid, body)
-            reload_cart()
-            snack("Скидка на чек обновлена", ft.Colors.GREEN_700)
-        except ApiError as ex:
-            snack(str(ex), ft.Colors.RED_700)
-        finally:
-            set_loading(False)
+
+        async def _apply_disc():
+            set_loading(True)
+            try:
+                resp = await asyncio.to_thread(client.pos_cart_patch, cid, body)
+                if not _apply_cart_from_response(resp):
+                    await _reload_cart_async()
+                snack("Скидка на чек обновлена", ft.Colors.GREEN_700)
+            except ApiError as ex:
+                snack(str(ex), ft.Colors.RED_700)
+            finally:
+                set_loading(False)
+
+        page.run_task(_apply_disc)
 
     def clear_order_discount(_):
         cid = session.get("cart_id")
         if not cid:
             return
-        set_loading(True)
-        try:
-            client.pos_cart_patch(cid, {"order_discount_percent": "0", "order_discount_total": "0"})
-            reload_cart()
-            snack("Скидка на чек сброшена", ft.Colors.GREEN_700)
-        except ApiError:
+
+        async def _clear_disc():
+            set_loading(True)
             try:
-                client.pos_cart_patch(cid, {"order_discount_percent": "0"})
-                reload_cart()
+                resp = await asyncio.to_thread(
+                    client.pos_cart_patch,
+                    cid,
+                    {"order_discount_percent": "0", "order_discount_total": "0"},
+                )
+                if not _apply_cart_from_response(resp):
+                    await _reload_cart_async()
                 snack("Скидка на чек сброшена", ft.Colors.GREEN_700)
-            except ApiError as ex2:
-                snack(str(ex2), ft.Colors.RED_700)
-        finally:
-            set_loading(False)
+            except ApiError:
+                try:
+                    resp2 = await asyncio.to_thread(
+                        client.pos_cart_patch, cid, {"order_discount_percent": "0"}
+                    )
+                    if not _apply_cart_from_response(resp2):
+                        await _reload_cart_async()
+                    snack("Скидка на чек сброшена", ft.Colors.GREEN_700)
+                except ApiError as ex2:
+                    snack(str(ex2), ft.Colors.RED_700)
+            finally:
+                set_loading(False)
+
+        page.run_task(_clear_disc)
 
     def open_line_item_edit(item: dict[str, Any], item_id: str):
         cid = session.get("cart_id")
@@ -674,22 +798,30 @@ def main(page: ft.Page):
             if err:
                 snack(err, ft.Colors.AMBER_700)
                 return
-            set_loading(True)
-            try:
-                body: dict[str, str] = {
-                    "quantity": normalize_decimal_string(tf_qty.value),
-                    "unit_price": normalize_decimal_string(tf_price.value),
-                    "discount_total": normalize_decimal_string(tf_disc.value) if str(tf_disc.value or "").strip() else "0.00",
-                }
-                client.pos_cart_item_patch(cid, item_id, body)
-                page.dialog.open = False
-                page.update()
-                reload_cart()
-                snack("Позиция обновлена", ft.Colors.GREEN_700)
-            except ApiError as ex:
-                snack(str(ex), ft.Colors.RED_700)
-            finally:
-                set_loading(False)
+
+            body: dict[str, str] = {
+                "quantity": normalize_decimal_string(tf_qty.value),
+                "unit_price": normalize_decimal_string(tf_price.value),
+                "discount_total": normalize_decimal_string(tf_disc.value)
+                if str(tf_disc.value or "").strip()
+                else "0.00",
+            }
+
+            async def _save_line():
+                set_loading(True)
+                try:
+                    resp = await asyncio.to_thread(client.pos_cart_item_patch, cid, item_id, body)
+                    page.dialog.open = False
+                    page.update()
+                    if not _apply_cart_from_response(resp):
+                        await _reload_cart_async()
+                    snack("Позиция обновлена", ft.Colors.GREEN_700)
+                except ApiError as ex:
+                    snack(str(ex), ft.Colors.RED_700)
+                finally:
+                    set_loading(False)
+
+            page.run_task(_save_line)
 
         def _cancel(_e):
             page.dialog.open = False
@@ -830,26 +962,37 @@ def main(page: ft.Page):
                     if q <= 0:
                         remove_item(item_id)
                         return
-                    set_loading(True)
-                    try:
-                        client.pos_cart_item_patch(cid, item_id, {"quantity": str(q)})
-                        reload_cart()
-                    except ApiError as ex:
-                        snack(str(ex), ft.Colors.RED_700)
-                    finally:
-                        set_loading(False)
+
+                    async def _qty_async():
+                        set_loading(True)
+                        try:
+                            resp = await asyncio.to_thread(
+                                client.pos_cart_item_patch, cid, item_id, {"quantity": str(q)}
+                            )
+                            if not _apply_cart_from_response(resp):
+                                await _reload_cart_async()
+                        except ApiError as ex:
+                            snack(str(ex), ft.Colors.RED_700)
+                        finally:
+                            set_loading(False)
+
+                    page.run_task(_qty_async)
 
                 def remove_item(item_id=iid):
                     if not cid or not item_id:
                         return
-                    set_loading(True)
-                    try:
-                        client.pos_cart_item_delete(cid, item_id)
-                        reload_cart()
-                    except ApiError as ex:
-                        snack(str(ex), ft.Colors.RED_700)
-                    finally:
-                        set_loading(False)
+
+                    async def _del_async():
+                        set_loading(True)
+                        try:
+                            await asyncio.to_thread(client.pos_cart_item_delete, cid, item_id)
+                            await _reload_cart_async()
+                        except ApiError as ex:
+                            snack(str(ex), ft.Colors.RED_700)
+                        finally:
+                            set_loading(False)
+
+                    page.run_task(_del_async)
 
                 col.controls.append(
                     ft.Container(
@@ -940,55 +1083,49 @@ def main(page: ft.Page):
         page.update()
 
     def reload_cart():
-        cid = session.get("cart_id")
-        if not cid:
-            return
-        try:
-            session["cart"] = client.pos_cart_get(cid)
-            sid = _shift_id_from_cart(session["cart"])
-            if sid:
-                session["active_shift_id"] = sid
-            render_cart_items()
-        except ApiError as ex:
-            snack(str(ex), ft.Colors.RED_700)
+        page.run_task(_reload_cart_async)
 
     def try_start_sale():
-        set_loading(True)
-        set_shift_banner(False)
-        try:
-            cb = session.get("pos_cashbox_id")
-            if not (cb and str(cb).strip()):
-                try:
-                    first_cb = _first_cashbox_id_from_list(client.construction_cashboxes_list())
-                    if first_cb:
-                        session["pos_cashbox_id"] = first_cb
-                        cb = first_cb
-                except ApiError:
-                    pass
-            cart = client.pos_sales_start(cashbox_id=cb if cb else None)
-            session["cart"] = cart
-            session["cart_id"] = str(cart.get("id")) if cart.get("id") else None
-            sid = _shift_id_from_cart(cart)
-            if sid:
-                session["active_shift_id"] = sid
+        async def _start():
+            set_loading(True)
             set_shift_banner(False)
-            render_cart_items()
-            snack("Продажа начата", ft.Colors.GREEN_700)
-        except ApiError as ex:
-            pl = ex.payload
-            detail = ""
-            if isinstance(pl, dict):
-                detail = str(pl.get("detail") or "")
-            if ex.status_code == 400 and ("Смена не открыта" in detail or "смена" in detail.lower()):
-                set_shift_banner(True, detail)
-                session["cart_id"] = None
-                session["cart"] = {}
-                session["active_shift_id"] = None
+            try:
+                cb = session.get("pos_cashbox_id")
+                if not (cb and str(cb).strip()):
+                    try:
+                        cbl = await asyncio.to_thread(client.construction_cashboxes_list)
+                        first_cb = _first_cashbox_id_from_list(cbl)
+                        if first_cb:
+                            session["pos_cashbox_id"] = first_cb
+                            cb = first_cb
+                    except ApiError:
+                        pass
+                cart = await asyncio.to_thread(client.pos_sales_start, cashbox_id=cb if cb else None)
+                session["cart"] = cart
+                session["cart_id"] = str(cart.get("id")) if cart.get("id") else None
+                sid = _shift_id_from_cart(cart)
+                if sid:
+                    session["active_shift_id"] = sid
+                set_shift_banner(False)
                 render_cart_items()
-            else:
-                snack(str(ex), ft.Colors.RED_700)
-        finally:
-            set_loading(False)
+                snack("Продажа начата", ft.Colors.GREEN_700)
+            except ApiError as ex:
+                pl = ex.payload
+                detail = ""
+                if isinstance(pl, dict):
+                    detail = str(pl.get("detail") or "")
+                if ex.status_code == 400 and ("Смена не открыта" in detail or "смена" in detail.lower()):
+                    set_shift_banner(True, detail)
+                    session["cart_id"] = None
+                    session["cart"] = {}
+                    session["active_shift_id"] = None
+                    render_cart_items()
+                else:
+                    snack(str(ex), ft.Colors.RED_700)
+            finally:
+                set_loading(False)
+
+        page.run_task(_start)
 
     def process_scan_code(code: str):
         show_error("")
@@ -1000,6 +1137,12 @@ def main(page: ft.Page):
         if not cid:
             show_error("Сначала начните продажу (кнопка «Начать продажу»)")
             return
+        # Отменить отложенный живой поиск и очистить поле — меньше лишних запросов и гонок с API.
+        session["search_gen"] = session.get("search_gen", 0) + 1
+        if search_field_ref.current:
+            search_field_ref.current.value = ""
+        clear_search_results()
+        page.update()
         session["scan_seq"] = int(session.get("scan_seq") or 0) + 1
         seq = session["scan_seq"]
         cid_s = str(cid)
@@ -1015,9 +1158,6 @@ def main(page: ft.Page):
                 return
             session["cart"] = cart
             render_cart_items()
-            if search_field_ref.current:
-                search_field_ref.current.value = ""
-            clear_search_results()
             page.update()
 
         page.run_task(_scan_task)
@@ -1029,7 +1169,7 @@ def main(page: ft.Page):
             return
         key = e.key or ""
         if _is_enter_key(key):
-            buf = session.get("barcode_buf", "").strip()
+            buf = (session.get("barcode_buf") or "").strip()
             session["barcode_buf"] = ""
             session["barcode_last_ms"] = 0.0
             if len(buf) >= MIN_BARCODE_LEN:
@@ -1038,12 +1178,15 @@ def main(page: ft.Page):
         ch = _key_to_barcode_char(key)
         if ch is None:
             return
-        now = time.time() * 1000.0
+        now_ms = time.perf_counter() * 1000.0
         last = float(session.get("barcode_last_ms") or 0.0)
-        if now - last > BARCODE_INTERKEY_RESET_MS:
+        if now_ms - last > BARCODE_INTERKEY_RESET_MS:
             session["barcode_buf"] = ""
-        session["barcode_buf"] = (session.get("barcode_buf") or "") + ch
-        session["barcode_last_ms"] = now
+        nb = (session.get("barcode_buf") or "") + ch
+        if len(nb) > BARCODE_BUFFER_MAX_LEN:
+            nb = nb[-BARCODE_BUFFER_MAX_LEN:]
+        session["barcode_buf"] = nb
+        session["barcode_last_ms"] = now_ms
 
     def clear_search_results():
         col = search_results_ref.current
@@ -1059,18 +1202,23 @@ def main(page: ft.Page):
         if not cid:
             snack("Сначала начните продажу", ft.Colors.AMBER_700)
             return
-        set_loading(True)
-        try:
-            session["cart"] = client.pos_add_item(cid, product_id)
-            render_cart_items()
-            if search_field_ref.current:
-                search_field_ref.current.value = ""
-            clear_search_results()
-            show_error("")
-        except ApiError as ex:
-            snack(str(ex), ft.Colors.RED_700)
-        finally:
-            set_loading(False)
+
+        async def _add():
+            set_loading(True)
+            try:
+                resp = await asyncio.to_thread(client.pos_add_item, cid, product_id)
+                if not _apply_cart_from_response(resp):
+                    await _reload_cart_async()
+                if search_field_ref.current:
+                    search_field_ref.current.value = ""
+                clear_search_results()
+                show_error("")
+            except ApiError as ex:
+                snack(str(ex), ft.Colors.RED_700)
+            finally:
+                set_loading(False)
+
+        page.run_task(_add)
 
     def _fill_search_results(products: list):
         col = search_results_ref.current
@@ -1144,15 +1292,19 @@ def main(page: ft.Page):
                 show_error("")
             page.update()
             return
-        set_loading(True)
-        try:
-            products = client.products_search(q)
-            _fill_search_results(products)
-            page.update()
-        except ApiError as ex:
-            snack(str(ex), ft.Colors.RED_700)
-        finally:
-            set_loading(False)
+
+        async def _search_task():
+            set_loading(True)
+            try:
+                products = await asyncio.to_thread(client.products_search, q)
+                _fill_search_results(products)
+                page.update()
+            except ApiError as ex:
+                snack(str(ex), ft.Colors.RED_700)
+            finally:
+                set_loading(False)
+
+        page.run_task(_search_task)
 
     async def _delayed_live_search(my_gen: int):
         await asyncio.sleep(LIVE_SEARCH_DEBOUNCE_SEC)
@@ -1179,177 +1331,187 @@ def main(page: ft.Page):
         _do_search(q, silent=False)
 
     def open_shift_dlg(_):
-        cashboxes = []
-        set_loading(True)
-        try:
-            cashboxes = client.construction_cashboxes_list()
-        except ApiError as ex:
-            snack(str(ex), ft.Colors.RED_700)
-        finally:
-            set_loading(False)
-
-        dd_options: list[ft.dropdown.Option] = []
-        default_cashbox: str | None = None
-        for c in cashboxes:
-            if not isinstance(c, dict):
-                continue
-            sid = _cashbox_id_from_dict(c)
-            if not sid:
-                continue
-            label = str(c.get("name") or c.get("title") or sid)
-            dd_options.append(ft.dropdown.Option(key=sid, text=label))
-            if default_cashbox is None:
-                default_cashbox = sid
-
-        keys_ok = {o.key for o in dd_options}
-        pref = session.get("pos_cashbox_id")
-        if pref and str(pref) in keys_ok:
-            default_cashbox = str(pref)
-
-        manual = ft.TextField(label="ID кассы", visible=not dd_options, dense=True, expand=True)
-        dd = ft.Dropdown(
-            label="Касса",
-            options=dd_options,
-            value=default_cashbox,
-            visible=bool(dd_options),
-            expand=True,
-        )
-        opening = ft.TextField(label="Начальная сумма", value="0.00", dense=True)
-
-        def do_open(_e):
-            box = (dd.value or "").strip() if dd.visible else ""
-            if not box:
-                box = (manual.value or "").strip()
-            if not box:
-                snack("Укажите кассу", ft.Colors.AMBER_700)
-                return
-            err = validate_cashbox_id(box)
-            if err:
-                snack(err, ft.Colors.AMBER_700)
-                return
-            ov, oerr = parse_decimal(opening.value, field_name="Начальная сумма", allow_negative=False)
-            if oerr:
-                snack(oerr, ft.Colors.AMBER_700)
-                return
+        async def _load_and_show():
             set_loading(True)
             try:
-                res = client.construction_shift_open(box, _money(ov))
-                session["pos_cashbox_id"] = box
-                new_sid = _shift_id_from_open_response(res)
-                if new_sid:
-                    session["active_shift_id"] = new_sid
-                page.pop_dialog()
-                page.update()
-                snack("Смена открыта", ft.Colors.GREEN_700)
-                try_start_sale()
+                cashboxes = await asyncio.to_thread(client.construction_cashboxes_list)
             except ApiError as ex:
                 snack(str(ex), ft.Colors.RED_700)
+                return
             finally:
                 set_loading(False)
 
-        dlg = ft.AlertDialog(
-            modal=True,
-            bgcolor=UI_SURFACE,
-            shape=ft.RoundedRectangleBorder(radius=16),
-            title=ft.Text("Открыть смену", color=UI_TEXT, weight=ft.FontWeight.W_600),
-            content=ft.Column(
-                [dd, manual, opening],
-                tight=True,
-                width=400,
-            ),
-            actions=[
-                ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
-                ft.FilledButton(
-                    "Открыть",
-                    style=ft.ButtonStyle(bgcolor=UI_ACCENT, color=UI_TEXT_ON_YELLOW),
-                    on_click=do_open,
+            dd_options: list[ft.dropdown.Option] = []
+            default_cashbox: str | None = None
+            for c in cashboxes:
+                if not isinstance(c, dict):
+                    continue
+                sid_cb = _cashbox_id_from_dict(c)
+                if not sid_cb:
+                    continue
+                label = str(c.get("name") or c.get("title") or sid_cb)
+                dd_options.append(ft.dropdown.Option(key=sid_cb, text=label))
+                if default_cashbox is None:
+                    default_cashbox = sid_cb
+
+            keys_ok = {o.key for o in dd_options}
+            pref = session.get("pos_cashbox_id")
+            if pref and str(pref) in keys_ok:
+                default_cashbox = str(pref)
+
+            manual = ft.TextField(label="ID кассы", visible=not dd_options, dense=True, expand=True)
+            dd = ft.Dropdown(
+                label="Касса",
+                options=dd_options,
+                value=default_cashbox,
+                visible=bool(dd_options),
+                expand=True,
+            )
+            opening = ft.TextField(label="Начальная сумма", value="0.00", dense=True)
+
+            def do_open(_e):
+                box = (dd.value or "").strip() if dd.visible else ""
+                if not box:
+                    box = (manual.value or "").strip()
+                if not box:
+                    snack("Укажите кассу", ft.Colors.AMBER_700)
+                    return
+                err = validate_cashbox_id(box)
+                if err:
+                    snack(err, ft.Colors.AMBER_700)
+                    return
+                ov, oerr = parse_decimal(
+                    opening.value, field_name="Начальная сумма", allow_negative=False
+                )
+                if oerr:
+                    snack(oerr, ft.Colors.AMBER_700)
+                    return
+
+                async def _open_shift():
+                    set_loading(True)
+                    try:
+                        res = await asyncio.to_thread(
+                            client.construction_shift_open, box, _money(ov)
+                        )
+                        session["pos_cashbox_id"] = box
+                        new_sid = _shift_id_from_open_response(res)
+                        if new_sid:
+                            session["active_shift_id"] = new_sid
+                        page.pop_dialog()
+                        page.update()
+                        snack("Смена открыта", ft.Colors.GREEN_700)
+                        try_start_sale()
+                    except ApiError as ex:
+                        snack(str(ex), ft.Colors.RED_700)
+                    finally:
+                        set_loading(False)
+
+                page.run_task(_open_shift)
+
+            dlg = ft.AlertDialog(
+                modal=True,
+                bgcolor=UI_SURFACE,
+                shape=ft.RoundedRectangleBorder(radius=16),
+                title=ft.Text("Открыть смену", color=UI_TEXT, weight=ft.FontWeight.W_600),
+                content=ft.Column(
+                    [dd, manual, opening],
+                    tight=True,
+                    width=400,
                 ),
-            ],
-        )
-        page.show_dialog(dlg)
+                actions=[
+                    ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
+                    ft.FilledButton(
+                        "Открыть",
+                        style=ft.ButtonStyle(bgcolor=UI_ACCENT, color=UI_TEXT_ON_YELLOW),
+                        on_click=do_open,
+                    ),
+                ],
+            )
+            page.show_dialog(dlg)
+
+        page.run_task(_load_and_show)
 
     def close_shift_click(_):
-        cart = session.get("cart") or {}
-        sid = _resolve_shift_id(session, cart)
-        if not sid:
-            try:
-                sid = _pick_open_shift_id_from_list(
-                    client.construction_shifts_list(),
-                    session.get("pos_cashbox_id"),
+        async def _resolve_and_show():
+            cart = session.get("cart") or {}
+            sid = _resolve_shift_id(session, cart)
+            if not sid:
+                try:
+                    lst = await asyncio.to_thread(client.construction_shifts_list)
+                    sid = _pick_open_shift_id_from_list(lst, session.get("pos_cashbox_id"))
+                except ApiError:
+                    sid = None
+            if not sid:
+                snack(
+                    "Не найдена открытая смена. Откройте смену или нажмите «Начать продажу», чтобы подтянуть данные с сервера.",
+                    ft.Colors.AMBER_700,
                 )
-            except ApiError:
-                sid = None
-        if not sid:
-            snack(
-                "Не найдена открытая смена. Откройте смену или нажмите «Начать продажу», чтобы подтянуть данные с сервера.",
-                ft.Colors.AMBER_700,
-            )
-            return
-        closing = ft.TextField(label="Наличные при закрытии", value="0.00", dense=True)
-
-        def do_close(_e):
-            cv, cerr = parse_decimal(closing.value, field_name="Наличные при закрытии", allow_negative=False)
-            if cerr:
-                snack(cerr, ft.Colors.AMBER_700)
                 return
-            set_loading(True)
-            try:
-                client.construction_shift_close(sid, _money(cv))
-                page.pop_dialog()
-                page.update()
-                session["active_shift_id"] = None
-                session["cart_id"] = None
-                session["cart"] = {}
-                render_cart_items()
-                snack("Смена закрыта", ft.Colors.GREEN_700)
-            except ApiError as ex:
-                snack(str(ex), ft.Colors.RED_700)
-            finally:
-                set_loading(False)
+            closing = ft.TextField(label="Наличные при закрытии", value="0.00", dense=True)
 
-        dlg = ft.AlertDialog(
-            modal=True,
-            bgcolor=UI_SURFACE,
-            shape=ft.RoundedRectangleBorder(radius=16),
-            title=ft.Text("Закрыть смену", color=UI_TEXT, weight=ft.FontWeight.W_600),
-            content=closing,
-            actions=[
-                ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
-                ft.FilledButton(
-                    "Закрыть",
-                    style=ft.ButtonStyle(bgcolor=UI_ACCENT, color=UI_TEXT_ON_YELLOW),
-                    on_click=do_close,
-                ),
-            ],
-        )
-        page.show_dialog(dlg)
+            def do_close(_e):
+                cv, cerr = parse_decimal(
+                    closing.value, field_name="Наличные при закрытии", allow_negative=False
+                )
+                if cerr:
+                    snack(cerr, ft.Colors.AMBER_700)
+                    return
 
-    def checkout_click(_):
-        cid = session.get("cart_id")
-        if not cid:
-            snack("Нет корзины", ft.Colors.AMBER_700)
-            return
-        cart = session.get("cart") or {}
-        items = cart.get("items") or cart.get("cart_items") or []
-        if not items:
-            snack("Добавьте товары в чек", ft.Colors.AMBER_700)
-            return
-        set_loading(True)
-        try:
-            session["cart"] = client.pos_cart_get(cid)
-        except ApiError as ex:
-            snack(str(ex), ft.Colors.RED_700)
-            return
-        finally:
-            set_loading(False)
+                async def _close_shift():
+                    set_loading(True)
+                    try:
+                        await asyncio.to_thread(client.construction_shift_close, sid, _money(cv))
+                        page.pop_dialog()
+                        page.update()
+                        session["active_shift_id"] = None
+                        session["cart_id"] = None
+                        session["cart"] = {}
+                        render_cart_items()
+                        snack("Смена закрыта", ft.Colors.GREEN_700)
+                    except ApiError as ex:
+                        snack(str(ex), ft.Colors.RED_700)
+                    finally:
+                        set_loading(False)
 
-        cart = session.get("cart") or {}
-        items = cart.get("items") or cart.get("cart_items") or []
-        if not items:
-            snack("Корзина на сервере пуста — обновите продажу", ft.Colors.AMBER_700)
-            return
+                page.run_task(_close_shift)
+
+            dlg = ft.AlertDialog(
+                modal=True,
+                bgcolor=UI_SURFACE,
+                shape=ft.RoundedRectangleBorder(radius=16),
+                title=ft.Text("Закрыть смену", color=UI_TEXT, weight=ft.FontWeight.W_600),
+                content=closing,
+                actions=[
+                    ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
+                    ft.FilledButton(
+                        "Закрыть",
+                        style=ft.ButtonStyle(bgcolor=UI_ACCENT, color=UI_TEXT_ON_YELLOW),
+                        on_click=do_close,
+                    ),
+                ],
+            )
+            page.show_dialog(dlg)
+
+        page.run_task(_resolve_and_show)
+
+    def open_checkout_payment_dialog(cart: dict, cid_key: str):
+        checkout_pay_msg = ft.Ref[ft.Text]()
+
+        def set_checkout_pay_msg(text: str):
+            t = checkout_pay_msg.current
+            if t:
+                s = (text or "").strip()
+                t.value = s
+                t.visible = bool(s)
+            page.update()
 
         tot_f = _cart_total_due(cart)
+        u_pay = client.user_payload
+        receipt_company = str(u_pay.get("company") or "—")
+        receipt_cashier = (
+            f"{u_pay.get('first_name', '')} {u_pay.get('last_name', '')}".strip()
+            or str(u_pay.get("email") or "—")
+        )
 
         cash_in = ft.TextField(
             label="Получено наличными",
@@ -1401,21 +1563,45 @@ def main(page: ft.Page):
         pay_seg.on_change = sync_pay_method
 
         def do_pay(_e):
+            set_checkout_pay_msg("")
             pm = pay_seg.selected[0] if pay_seg.selected else "cash"
             want_print = is_receipt_printing_enabled()
             body: dict[str, Any] = {"payment_method": pm, "print_receipt": want_print}
             if pm == "cash":
                 err = validate_cash_received(cash_in.value, tot_f)
                 if err:
+                    set_checkout_pay_msg(err)
                     snack(err, ft.Colors.AMBER_700)
                     return
                 body["cash_received"] = normalize_decimal_string(cash_in.value)
             else:
                 body["cash_received"] = "0.00"
-            set_loading(True)
-            try:
-                cart_snapshot = dict(session.get("cart") or {})
-                res = client.pos_checkout(cid, body)
+
+            cart_snapshot = dict(session.get("cart") or {})
+            cid_pay = cid_key
+            cash_recv = normalize_decimal_string(cash_in.value) if pm == "cash" else None
+
+            async def _checkout_async():
+                set_loading(True)
+                page.update()
+                try:
+                    res = await asyncio.to_thread(client.pos_checkout, cid_pay, body)
+                except ApiError as ex:
+                    set_checkout_pay_msg(str(ex))
+                    snack(str(ex), ft.Colors.RED_700)
+                    return
+                except requests.exceptions.RequestException as ex:
+                    set_checkout_pay_msg(f"Сеть: {ex}")
+                    snack(f"Сеть: {ex}", ft.Colors.RED_700)
+                    return
+                except Exception as ex:
+                    set_checkout_pay_msg(str(ex))
+                    snack(str(ex), ft.Colors.RED_700)
+                    return
+                finally:
+                    set_loading(False)
+                    page.update()
+
                 page.pop_dialog()
                 page.update()
                 ch = _checkout_change_amount(res)
@@ -1428,7 +1614,9 @@ def main(page: ft.Page):
                     try:
                         txt = _receipt_text_from_checkout_response(res)
                         if not txt and sale_id:
-                            txt = _fetch_receipt_text_via_api(client, sale_id)
+                            txt = await asyncio.to_thread(
+                                _fetch_receipt_text_via_api, client, sale_id
+                            )
                         if txt:
                             try:
                                 print_receipt_text(txt)
@@ -1436,31 +1624,31 @@ def main(page: ft.Page):
                                 print_sale_receipt(
                                     cart=cart_snapshot,
                                     payment_method=pm,
-                                    cash_received=normalize_decimal_string(cash_in.value) if pm == "cash" else None,
+                                    cash_received=cash_recv,
                                     change_amount=ch,
                                     sale_id=sale_id,
-                                    company=str(company),
-                                    cashier=str(name),
+                                    company=receipt_company,
+                                    cashier=receipt_cashier,
                                 )
                         else:
                             print_sale_receipt(
                                 cart=cart_snapshot,
                                 payment_method=pm,
-                                cash_received=normalize_decimal_string(cash_in.value) if pm == "cash" else None,
+                                cash_received=cash_recv,
                                 change_amount=ch,
                                 sale_id=sale_id,
-                                company=str(company),
-                                cashier=str(name),
+                                company=receipt_company,
+                                cashier=receipt_cashier,
                             )
                     except ReceiptPrinterError as ex:
                         snack(f"Чек не напечатан: {ex}", ft.Colors.AMBER_700)
+                    except Exception as ex:
+                        snack(f"Печать чека: {ex}", ft.Colors.AMBER_700)
                 session["cart_id"] = None
                 session["cart"] = {}
                 try_start_sale()
-            except ApiError as ex:
-                snack(str(ex), ft.Colors.RED_700)
-            finally:
-                set_loading(False)
+
+            page.run_task(_checkout_async)
 
         def close_checkout_dlg(_e=None):
             page.pop_dialog()
@@ -1487,6 +1675,13 @@ def main(page: ft.Page):
             content=ft.Container(
                 content=ft.Column(
                     [
+                        ft.Text(
+                            ref=checkout_pay_msg,
+                            value="",
+                            size=13,
+                            color=ft.Colors.RED_700,
+                            visible=False,
+                        ),
                         ft.Container(
                             content=ft.Column(
                                 [
@@ -1564,6 +1759,38 @@ def main(page: ft.Page):
         )
         page.show_dialog(dlg)
 
+    def checkout_click(_):
+        cid = session.get("cart_id")
+        if not cid:
+            snack("Нет корзины", ft.Colors.AMBER_700)
+            return
+        cart = session.get("cart") or {}
+        items = cart.get("items") or cart.get("cart_items") or []
+        if not items:
+            snack("Добавьте товары в чек", ft.Colors.AMBER_700)
+            return
+
+        async def _prep_checkout():
+            set_loading(True)
+            try:
+                fresh = await asyncio.to_thread(client.pos_cart_get, str(cid))
+            except ApiError as ex:
+                snack(str(ex), ft.Colors.RED_700)
+                return
+            finally:
+                set_loading(False)
+            session["cart"] = fresh
+            items2 = fresh.get("items") or fresh.get("cart_items") or []
+            if not items2:
+                snack(
+                    "Корзина на сервере пуста — обновите продажу",
+                    ft.Colors.AMBER_700,
+                )
+                return
+            open_checkout_payment_dialog(fresh, str(cid))
+
+        page.run_task(_prep_checkout)
+
     def build_login() -> ft.Column:
         _login_field_fill = UI_SURFACE_ELEV
         email = ft.TextField(
@@ -1603,16 +1830,22 @@ def main(page: ft.Page):
             if err:
                 show_error(err)
                 return
-            set_loading(True)
-            try:
-                client.login(email.value.strip(), password.value)
-                open_cashier()
-            except ApiError as ex:
-                show_error(str(ex))
-            except requests.exceptions.RequestException as ex:
-                show_error(f"Сеть: {ex}")
-            finally:
-                set_loading(False)
+
+            async def _login_task():
+                set_loading(True)
+                try:
+                    await asyncio.to_thread(
+                        client.login, email.value.strip(), password.value
+                    )
+                    open_cashier()
+                except ApiError as ex:
+                    show_error(str(ex))
+                except requests.exceptions.RequestException as ex:
+                    show_error(f"Сеть: {ex}")
+                finally:
+                    set_loading(False)
+
+            page.run_task(_login_task)
 
         api_hint = ft.Text(f"API: {API_BASE_URL}", size=11, color=UI_MUTED)
 
@@ -2719,8 +2952,20 @@ def main(page: ft.Page):
 
     page.add(ft.Stack([build_login(), build_loading_overlay()], expand=True))
 
+    if sys.platform == "win32":
+
+        async def _win_center_window():
+            try:
+                await page.window.wait_until_ready_to_show()
+                await page.window.center()
+            except Exception:
+                pass
+
+        page.run_task(_win_center_window)
+
 
 if __name__ == "__main__":
+    _windows_pre_ui_init()
     try:
         import flet_desktop  # noqa: F401 — рантайм окна; версия должна совпадать с flet
     except ImportError:
