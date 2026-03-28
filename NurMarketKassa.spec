@@ -6,7 +6,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('C:\\Users\\TechLine\\OneDrive\\Рабочий стол\\принтер\\bundle_escpos\\capabilities.json', 'escpos')],
-    hiddenimports=['escpos.printer', 'escpos.capabilities', 'serial', 'usb.core', 'usb.util'],
+    hiddenimports=['escpos.printer', 'escpos.capabilities', 'serial', 'serial.tools.list_ports', 'usb.core', 'usb.util'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    version='C:\\Users\\TechLine\\AppData\\Local\\Temp\\d6080b70-4787-42a4-9fc8-cd6221034174',
+    version='C:\\Users\\TechLine\\AppData\\Local\\Temp\\74067965-87ea-4944-9cae-37dc245e7e69',
 )

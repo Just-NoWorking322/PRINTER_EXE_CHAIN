@@ -53,6 +53,7 @@ $addData = "$capJson;escpos"
     --hidden-import escpos.printer `
     --hidden-import escpos.capabilities `
     --hidden-import serial `
+    --hidden-import serial.tools.list_ports `
     --hidden-import usb.core `
     --hidden-import usb.util
 
