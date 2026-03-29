@@ -19,8 +19,8 @@ env/
 !.env.example
 
 # PyInstaller / Flet pack (артефакты сборки; NurMarketKassa.spec можно коммитить)
-build/
-dist/
+# build/
+# dist/
 
 # Local printer and app settings (пути COM, VID/PID и т.д.)
 printer_settings.json
