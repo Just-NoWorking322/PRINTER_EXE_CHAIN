@@ -43,7 +43,11 @@ def _parse_error(resp: requests.Response) -> str:
             return "; ".join(parts) if parts else resp.text or str(resp.status_code)
     except (json.JSONDecodeError, ValueError):
         pass
-    return resp.text or f"HTTP {resp.status_code}"
+    raw = (resp.text or "").strip()
+    low = raw[:500].lower()
+    if raw.startswith("<!") or "<html" in low:
+        return f"HTTP {resp.status_code}: адрес API не найден или неверный путь (ожидался JSON)."
+    return raw or f"HTTP {resp.status_code}"
 
 
 def unwrap_list(data: Any) -> list:
@@ -403,10 +407,29 @@ class JwtClient:
         return self._request("GET", f"/api/main/products/barcode/{barcode}/")
 
     def products_search(self, query: str, limit: int = 40) -> list:
-        """Поиск товаров по названию (Django REST: обычно ?search=)."""
+        """
+        Поиск по названию. На nurcrm каталог отдаётся с /api/main/products/list/ (results, page),
+        старый путь /api/main/products/ может отвечать 404 HTML.
+        """
         q = (query or "").strip()
         if not q:
             return []
-        data = self._request("GET", "/api/main/products/", params={"search": q})
-        items = unwrap_list(data)
-        return items[:limit] if isinstance(items, list) else []
+        candidates: tuple[tuple[str, dict[str, Any]], ...] = (
+            ("/api/main/products/list/", {"search": q, "page": 1}),
+            ("/api/main/products/", {"search": q}),
+        )
+        last_err: ApiError | None = None
+        for path, params in candidates:
+            try:
+                data = self._request("GET", path, params=params)
+                items = unwrap_list(data)
+                if isinstance(items, list):
+                    return items[:limit]
+            except ApiError as e:
+                last_err = e
+                if e.status_code == 404:
+                    continue
+                raise
+        if last_err:
+            raise last_err
+        return []

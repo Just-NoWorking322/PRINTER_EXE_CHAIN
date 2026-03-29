@@ -1,6 +1,10 @@
 """
 Десктоп-касса на Flet: JWT, смена (construction), POS-корзина, скан, оплата.
 DESKTOP_MARKET_API_URL — базовый URL API (по умолчанию https://app.nurcrm.kg).
+DESKTOP_MARKET_FULLSCREEN — 1 (по умолчанию) полноэкранный режим; 0 — окно.
+DESKTOP_MARKET_SCALE_ENABLED — 0 отключает блок весов.
+DESKTOP_MARKET_RECEIPT_USE_API_TEXT — 1: печатать сырой текст чека с API; иначе — оформленный локальный макет.
+DESKTOP_MARKET_RECEIPT_COERCE_CP866_TABLE — 1: при CP866 принудительно ESC t 17 вместо 46 (по умолчанию выкл.).
 """
 
 from __future__ import annotations
@@ -8,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import subprocess
 import sys
 import time
 from typing import Any
@@ -60,6 +65,65 @@ from validators import (
     validate_unit_price,
     validate_cashbox_id,
 )
+
+
+def install_windows_autostart_shortcut() -> tuple[bool, str]:
+    """Создаёт ярлык NurMarketKassa.lnk в папке автозагрузки текущего пользователя Windows."""
+    if sys.platform != "win32":
+        return False, "Доступно только в Windows."
+    appdata = (os.environ.get("APPDATA") or "").strip()
+    if not appdata:
+        return False, "Не задана переменная APPDATA."
+    lnk_path = os.path.join(
+        appdata,
+        "Microsoft",
+        "Windows",
+        "Start Menu",
+        "Programs",
+        "Startup",
+        "NurMarketKassa.lnk",
+    )
+    if getattr(sys, "frozen", False):
+        target = sys.executable
+        arguments = ""
+        workdir = os.path.dirname(target) or os.getcwd()
+    else:
+        target = sys.executable
+        main_py = os.path.abspath(__file__)
+        arguments = f'"{main_py}"'
+        workdir = os.path.dirname(main_py)
+
+    def _ps_sq(s: str) -> str:
+        return s.replace("'", "''")
+
+    ps = (
+        "$WshShell = New-Object -ComObject WScript.Shell; "
+        f"$sc = $WshShell.CreateShortcut('{_ps_sq(lnk_path)}'); "
+        f"$sc.TargetPath = '{_ps_sq(target)}'; "
+        f"$sc.Arguments = '{_ps_sq(arguments)}'; "
+        f"$sc.WorkingDirectory = '{_ps_sq(workdir)}'; "
+        "$sc.Save()"
+    )
+    try:
+        r = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                ps,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip() or f"код {r.returncode}"
+            return False, err
+        return True, lnk_path
+    except Exception as ex:
+        return False, str(ex)
 
 
 def _money(v: Any) -> str:
@@ -171,6 +235,67 @@ def _item_line_total(it: dict[str, Any]) -> str:
     except (TypeError, ValueError):
         pass
     return "0.00"
+
+
+def _truthy_api_bool(v: Any) -> bool:
+    if v is True:
+        return True
+    if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and v != 0:
+        return True
+    return False
+
+
+def _unit_is_kg(unit: Any) -> bool:
+    """Как на веб-кассе: единица «кг» / kg — весовой товар."""
+    if unit is None:
+        return False
+    raw = str(unit).strip().lower()
+    if not raw:
+        return False
+    compact = raw.replace(" ", "").replace(".", "")
+    if compact in ("кг", "kg", "kг", "kilogram", "kilograms"):
+        return True
+    if "килограм" in raw:
+        return True
+    if compact.endswith("кг") or raw.endswith(" kg"):
+        return True
+    return False
+
+
+def _dict_has_kg_unit(d: dict[str, Any]) -> bool:
+    for k in ("unit", "unit_display", "measure_unit", "sale_unit", "uom"):
+        if _unit_is_kg(d.get(k)):
+            return True
+    return False
+
+
+def _product_must_weigh(p: Any) -> bool:
+    """Взвешивание: is_wait / is_weight или unit=кг (на бэкенде часто is_weight=false при unit «кг»)."""
+    if not isinstance(p, dict):
+        return False
+    if _truthy_api_bool(p.get("is_wait")):
+        return True
+    if _truthy_api_bool(p.get("is_weight")):
+        return True
+    if _dict_has_kg_unit(p):
+        return True
+    return False
+
+
+def _cart_line_must_weigh(it: dict[str, Any]) -> bool:
+    if _truthy_api_bool(it.get("is_wait")) or _truthy_api_bool(it.get("is_weight")):
+        return True
+    if _dict_has_kg_unit(it):
+        return True
+    prod = it.get("product")
+    if isinstance(prod, dict) and _product_must_weigh(prod):
+        return True
+    snap = it.get("product_snapshot")
+    if isinstance(snap, dict) and _product_must_weigh(snap):
+        return True
+    return False
 
 
 def _shift_id_from_cart(cart: dict[str, Any]) -> str | None:
@@ -566,6 +691,9 @@ def main(page: ft.Page):
     page.window.height = 840
     page.window.min_width = 960
     page.window.min_height = 640
+    _fs = os.environ.get("DESKTOP_MARKET_FULLSCREEN", "1").strip().lower()
+    page.window.full_screen = _fs not in ("0", "false", "no", "off")
+    page.window.prevent_close = False
     page.padding = 0
 
     printer_config.load_from_disk()
@@ -593,6 +721,8 @@ def main(page: ft.Page):
     total_txt = ft.Ref[ft.Text]()
     search_field_ref = ft.Ref[ft.TextField]()
     search_results_ref = ft.Ref[ft.Column]()
+    # Подсказки/ошибки на экране кассы (поле error_text есть только на логине — их не было видно).
+    cashier_hint_ref = ft.Ref[ft.Text]()
     status_chip = ft.Ref[ft.Text]()
     order_discount_pct_ref = ft.Ref[ft.TextField]()
     order_discount_sum_ref = ft.Ref[ft.TextField]()
@@ -612,12 +742,27 @@ def main(page: ft.Page):
         if error_text.current:
             error_text.current.value = msg
             error_text.current.visible = bool(msg)
-            page.update()
+        if cashier_hint_ref.current:
+            s = (msg or "").strip()
+            cashier_hint_ref.current.value = msg or ""
+            cashier_hint_ref.current.visible = bool(s)
+        page.update()
 
     def snack(msg: str, color: str | None = None):
         page.snack_bar = ft.SnackBar(ft.Text(msg), bgcolor=color)
         page.snack_bar.open = True
         page.update()
+
+    def on_window_event(ev: ft.WindowEvent):
+        if ev.type != ft.WindowEventType.CLOSE:
+            return
+        if session.get("cashier_active"):
+            snack(
+                "Чтобы закрыть программу, выйдите из аккаунта (кнопка выхода справа).",
+                ft.Colors.AMBER_700,
+            )
+
+    page.window.on_event = on_window_event
 
     def _cart_from_patch_response(data: Any) -> dict[str, Any] | None:
         """Если PATCH вернул полную корзину — второй GET не нужен."""
@@ -929,6 +1074,11 @@ def main(page: ft.Page):
                 qty = str(it.get("quantity", "1"))
                 line = _item_line_total(it)
                 disc_line = _item_discount_display(it)
+                line_is_weighed = _cart_line_must_weigh(it)
+                qty_unit = "кг" if line_is_weighed else "шт"
+                qstep = 0.1 if line_is_weighed else 1.0
+                tip_minus = "Меньше на 100 г" if line_is_weighed else "−1 шт"
+                tip_plus = "Больше на 100 г" if line_is_weighed else "+1 шт"
                 _icon_btn_style = ft.ButtonStyle(
                     padding=ft.Padding.symmetric(horizontal=2, vertical=2),
                 )
@@ -942,7 +1092,7 @@ def main(page: ft.Page):
                         overflow=ft.TextOverflow.ELLIPSIS,
                     ),
                     ft.Text(
-                        f"{qty} × {_money(it.get('unit_price'))} сом",
+                        f"{qty} {qty_unit} × {_money(it.get('unit_price'))} сом",
                         size=12,
                         color=UI_MUTED,
                         no_wrap=True,
@@ -958,13 +1108,14 @@ def main(page: ft.Page):
                         ),
                     )
 
-                def qty_patch(delta: float, item=it, item_id=iid):
+                def qty_patch(direction: int, item=it, item_id=iid, step=qstep):
                     if not cid or not item_id:
                         return
                     try:
-                        q = float(item.get("quantity") or 0) + delta
+                        cur = float(item.get("quantity") or 0)
                     except (TypeError, ValueError):
-                        q = delta
+                        cur = 0.0
+                    q = round(cur + direction * step, 4)
                     if q <= 0:
                         remove_item(item_id)
                         return
@@ -973,7 +1124,10 @@ def main(page: ft.Page):
                         set_loading(True)
                         try:
                             resp = await asyncio.to_thread(
-                                client.pos_cart_item_patch, cid, item_id, {"quantity": str(q)}
+                                client.pos_cart_item_patch,
+                                cid,
+                                item_id,
+                                {"quantity": str(q)},
                             )
                             if not _apply_cart_from_response(resp):
                                 await _reload_cart_async()
@@ -1034,7 +1188,7 @@ def main(page: ft.Page):
                                         ),
                                         ft.IconButton(
                                             ft.Icons.REMOVE,
-                                            tooltip="−1",
+                                            tooltip=tip_minus,
                                             icon_color=UI_MUTED,
                                             icon_size=20,
                                             style=_icon_btn_style,
@@ -1042,7 +1196,7 @@ def main(page: ft.Page):
                                         ),
                                         ft.IconButton(
                                             ft.Icons.ADD,
-                                            tooltip="+1",
+                                            tooltip=tip_plus,
                                             icon_color=UI_ACCENT,
                                             icon_size=20,
                                             style=_icon_btn_style,
@@ -1118,6 +1272,7 @@ def main(page: ft.Page):
                     pass
                 set_shift_banner(False)
                 render_cart_items()
+                show_error("")
                 snack("Продажа начата", ft.Colors.GREEN_700)
             except ApiError as ex:
                 pl = ex.payload
@@ -1159,9 +1314,17 @@ def main(page: ft.Page):
 
         async def _scan_task():
             branch = client.active_branch_id
-            cached_pid = local_products_cache.get_cached_product_id(branch, code)
+            cached = local_products_cache.get_cached_scan_row(branch, code)
+            cached_pid = cached.get("product_id") if cached else None
+            cached_unit = cached.get("unit") if cached else None
+            # Быстрый pos_add_item только для явно не-кг (в API часто is_weight=false при unit=кг).
+            use_fast_add = (
+                bool(cached_pid)
+                and cached_unit is not None
+                and not _unit_is_kg(cached_unit)
+            )
             cart: dict[str, Any] | None = None
-            if cached_pid:
+            if use_fast_add:
                 try:
                     cart = await asyncio.to_thread(client.pos_add_item, cid_s, cached_pid)
                 except ApiError:
@@ -1216,7 +1379,7 @@ def main(page: ft.Page):
         if col:
             col.controls.clear()
 
-    def add_product_by_id(product_id: str):
+    def add_product_by_id(product_id: str, quantity: str | None = None):
         err = validate_product_id(product_id)
         if err:
             snack(err, ft.Colors.AMBER_700)
@@ -1229,7 +1392,11 @@ def main(page: ft.Page):
         async def _add():
             set_loading(True)
             try:
-                resp = await asyncio.to_thread(client.pos_add_item, cid, product_id)
+                q = (quantity or "").strip()
+                if q:
+                    resp = await asyncio.to_thread(client.pos_add_item, cid, product_id, q)
+                else:
+                    resp = await asyncio.to_thread(client.pos_add_item, cid, product_id)
                 if not _apply_cart_from_response(resp):
                     await _reload_cart_async()
                 try:
@@ -1249,6 +1416,108 @@ def main(page: ft.Page):
 
         page.run_task(_add)
 
+    def open_weighed_product_dialog(product: dict[str, Any]):
+        """Товары с is_wait / is_weight: ввод кг, кнопка «С весов», затем в чек с quantity."""
+        if not isinstance(product, dict):
+            return
+        pid = str(product.get("id") or "").strip()
+        if not pid:
+            snack("Нет id товара", ft.Colors.AMBER_700)
+            return
+        if not session.get("cart_id"):
+            snack("Сначала начните продажу", ft.Colors.AMBER_700)
+            return
+        pname = str(product.get("name") or "Товар")
+
+        mgr = scale_state.get("mgr")
+        initial = ""
+        if mgr:
+            w = mgr.get_last_weight()
+            if w is not None and w > 0:
+                initial = f"{w:.3f}".rstrip("0").rstrip(".") or str(w)
+
+        def close_dlg():
+            page.pop_dialog()
+            page.update()
+
+        def do_weighed_add(_e=None):
+            err = validate_quantity(tf_q.value)
+            if err:
+                snack(err, ft.Colors.AMBER_700)
+                return
+            qstr = normalize_decimal_string(tf_q.value)
+            close_dlg()
+            add_product_by_id(pid, quantity=qstr)
+
+        def apply_from_scale(_e):
+            m = scale_state.get("mgr")
+            if not m:
+                snack("Весы не подключены — настройте COM в «Весы»", ft.Colors.AMBER_700)
+                return
+            w = m.get_last_weight()
+            if w is None or w <= 0:
+                snack("Нет веса с весов (поставьте товар и подождите)", ft.Colors.AMBER_700)
+                return
+            s = f"{w:.3f}".rstrip("0").rstrip(".")
+            tf_q.value = s if s else str(w)
+            page.update()
+
+        tf_q = ft.TextField(
+            label="Вес, кг",
+            value=initial,
+            hint_text="Введите вручную или «С весов»",
+            dense=True,
+            autofocus=True,
+            on_submit=do_weighed_add,
+        )
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            bgcolor=UI_SURFACE,
+            shape=ft.RoundedRectangleBorder(radius=16),
+            title=ft.Text(
+                f"Взвесить: {pname}",
+                color=UI_TEXT,
+                weight=ft.FontWeight.W_600,
+            ),
+            content=ft.Column(
+                [
+                    ft.Text(
+                        f"Цена за кг: {_money(product.get('price'))} сом",
+                        size=12,
+                        color=UI_MUTED,
+                    ),
+                    tf_q,
+                    ft.OutlinedButton(
+                        "С весов",
+                        icon=ft.Icons.SCALE_OUTLINED,
+                        on_click=apply_from_scale,
+                    ),
+                ],
+                tight=True,
+                width=320,
+                spacing=10,
+            ),
+            actions=[
+                ft.TextButton("Отмена", on_click=lambda e: close_dlg()),
+                ft.FilledButton(
+                    "В чек",
+                    style=ft.ButtonStyle(bgcolor=UI_ACCENT, color=UI_TEXT_ON_YELLOW),
+                    on_click=do_weighed_add,
+                ),
+            ],
+        )
+        page.show_dialog(dlg)
+
+    def pick_product_from_search(p: dict[str, Any]):
+        if not isinstance(p, dict) or not p.get("id"):
+            snack("Некорректная карточка товара", ft.Colors.AMBER_700)
+            return
+        if _product_must_weigh(p):
+            open_weighed_product_dialog(p)
+        else:
+            add_product_by_id(str(p.get("id")))
+
     def _fill_search_results(products: list):
         col = search_results_ref.current
         if not col:
@@ -1266,9 +1535,11 @@ def main(page: ft.Page):
             pid_s = str(pid)
             title = str(p.get("name") or "—")
             price = _money(p.get("price"))
+            must_weigh = _product_must_weigh(p)
+            sub_price = f"{price} сом за кг · на вес" if must_weigh else f"{price} сом"
 
-            def on_pick(e, product_id=pid_s):
-                add_product_by_id(product_id)
+            def on_pick(e, row=p):
+                pick_product_from_search(row)
 
             col.controls.append(
                 ft.ListTile(
@@ -1280,11 +1551,11 @@ def main(page: ft.Page):
                         overflow=ft.TextOverflow.ELLIPSIS,
                     ),
                     subtitle=ft.Text(
-                        f"{price} сом",
+                        sub_price,
                         size=12,
                         color=UI_ACCENT,
                         weight=ft.FontWeight.W_500,
-                        max_lines=1,
+                        max_lines=2,
                         overflow=ft.TextOverflow.ELLIPSIS,
                     ),
                     dense=True,
@@ -1302,29 +1573,31 @@ def main(page: ft.Page):
             if not silent:
                 show_error("Введите минимум 2 символа для поиска по названию")
             else:
+                # Живой поиск: не дёргаем подсказку на каждый символ
                 show_error("")
             page.update()
             return
         qerr = validate_search_query(q)
         if qerr:
+            show_error(qerr)
             if not silent:
-                show_error(qerr)
-            else:
                 snack(qerr, ft.Colors.AMBER_700)
             page.update()
             return
         if not session.get("cart_id"):
             clear_search_results()
+            show_error(
+                "Сначала нажмите «Начать продажу» (сверху), затем введите от 2 букв названия товара."
+            )
             if not silent:
-                show_error("Сначала начните продажу")
-            else:
-                show_error("")
+                snack("Сначала начните продажу", ft.Colors.AMBER_700)
             page.update()
             return
 
         async def _search_task():
             set_loading(True)
             try:
+                show_error("")
                 products = await asyncio.to_thread(client.products_search, q)
                 try:
                     local_products_cache.ingest_product_list(
@@ -1335,6 +1608,7 @@ def main(page: ft.Page):
                 _fill_search_results(products)
                 page.update()
             except ApiError as ex:
+                show_error(str(ex))
                 snack(str(ex), ft.Colors.RED_700)
             finally:
                 set_loading(False)
@@ -1646,25 +1920,17 @@ def main(page: ft.Page):
                     msg += f" (продажа {str(sale_id)[:8]}…)"
                 snack(msg, ft.Colors.GREEN_700)
                 if want_print:
+                    use_api_receipt = os.environ.get(
+                        "DESKTOP_MARKET_RECEIPT_USE_API_TEXT", ""
+                    ).strip().lower() in ("1", "true", "yes", "on")
+                    txt = _receipt_text_from_checkout_response(res)
+                    if not txt and sale_id:
+                        txt = await asyncio.to_thread(
+                            _fetch_receipt_text_via_api, client, sale_id
+                        )
                     try:
-                        txt = _receipt_text_from_checkout_response(res)
-                        if not txt and sale_id:
-                            txt = await asyncio.to_thread(
-                                _fetch_receipt_text_via_api, client, sale_id
-                            )
-                        if txt:
-                            try:
-                                print_receipt_text(txt)
-                            except ReceiptPrinterError:
-                                print_sale_receipt(
-                                    cart=cart_snapshot,
-                                    payment_method=pm,
-                                    cash_received=cash_recv,
-                                    change_amount=ch,
-                                    sale_id=sale_id,
-                                    company=receipt_company,
-                                    cashier=receipt_cashier,
-                                )
+                        if use_api_receipt and txt:
+                            print_receipt_text(txt)
                         else:
                             print_sale_receipt(
                                 cart=cart_snapshot,
@@ -1676,7 +1942,29 @@ def main(page: ft.Page):
                                 cashier=receipt_cashier,
                             )
                     except ReceiptPrinterError as ex:
-                        snack(f"Чек не напечатан: {ex}", ft.Colors.AMBER_700)
+                        fallback = False
+                        if not use_api_receipt and txt:
+                            try:
+                                print_receipt_text(txt)
+                                fallback = True
+                            except ReceiptPrinterError:
+                                pass
+                        elif use_api_receipt:
+                            try:
+                                print_sale_receipt(
+                                    cart=cart_snapshot,
+                                    payment_method=pm,
+                                    cash_received=cash_recv,
+                                    change_amount=ch,
+                                    sale_id=sale_id,
+                                    company=receipt_company,
+                                    cashier=receipt_cashier,
+                                )
+                                fallback = True
+                            except ReceiptPrinterError:
+                                pass
+                        if not fallback:
+                            snack(f"Чек не напечатан: {ex}", ft.Colors.AMBER_700)
                     except Exception as ex:
                         snack(f"Печать чека: {ex}", ft.Colors.AMBER_700)
                 session["cart_id"] = None
@@ -1826,6 +2114,9 @@ def main(page: ft.Page):
 
         page.run_task(_prep_checkout)
 
+    async def _quit_desktop_app():
+        await page.window.destroy()
+
     def build_login() -> ft.Column:
         _login_field_fill = UI_SURFACE_ELEV
         email = ft.TextField(
@@ -1921,6 +2212,17 @@ def main(page: ft.Page):
                                     ),
                                     on_click=do_login,
                                 ),
+                                ft.Container(height=10),
+                                ft.OutlinedButton(
+                                    "Закрыть программу",
+                                    width=float("inf"),
+                                    style=ft.ButtonStyle(
+                                        color=UI_MUTED,
+                                        side=ft.BorderSide(1, UI_BORDER),
+                                        shape=ft.RoundedRectangleBorder(radius=10),
+                                    ),
+                                    on_click=lambda _: page.run_task(_quit_desktop_app),
+                                ),
                                 ft.Container(height=14),
                                 api_hint,
                             ],
@@ -1972,6 +2274,7 @@ def main(page: ft.Page):
         page.on_keyboard_event = on_global_keyboard
         page.controls.clear()
         page.add(build_cashier())
+        page.window.prevent_close = True
         page.update()
         if scale_feature_enabled:
             old = scale_state.get("mgr")
@@ -2008,6 +2311,7 @@ def main(page: ft.Page):
         session["pos_cashbox_id"] = None
         session["active_shift_id"] = None
         page.controls.clear()
+        page.window.prevent_close = False
         page.add(ft.Stack([build_login(), build_loading_overlay()], expand=True))
         page.update()
 
@@ -2120,7 +2424,10 @@ def main(page: ft.Page):
         tf_escpos_table = ft.TextField(
             label="Таблица ESC t (0–255)",
             value=_opt_str(cur.get("escpos_table")),
-            hint_text="Пусто: авто (CP866→17, CP1251→46). Кракозябры — попробуйте 46 с CP1251",
+            hint_text=(
+                "Пусто: авто (CP866→17, WPC1251/CP1251→46). Указали число — уходит как есть "
+                "(на части Cashino+LPT читаемее CP866+46). Кракозябры — поменяйте пару кодировка/слот."
+            ),
             dense=True,
             width=420,
         )
@@ -2143,6 +2450,8 @@ def main(page: ft.Page):
             back = (dd_backend.value or "none").strip().lower()
             if back == "lpt" and not fp:
                 fp = "LPT1"
+            enc = (dd_encoding.value or "cp866").strip().lower()
+            et = (tf_escpos_table.value or "").strip()
             return {
                 "backend": back,
                 "serial_port": (tf_serial_port.value or "COM3").strip(),
@@ -2155,9 +2464,9 @@ def main(page: ft.Page):
                 "usb_product": (tf_usb_p.value or "").strip(),
                 "usb_in_ep": _parse_int(tf_usb_in.value or "0x82", 0x82),
                 "usb_out_ep": _parse_int(tf_usb_out.value or "0x01", 0x01),
-                "text_encoding": (dd_encoding.value or "cp866").strip(),
+                "text_encoding": enc,
                 "escpos_profile": (dd_escpos_profile.value or "default").strip(),
-                "escpos_table": (tf_escpos_table.value or "").strip(),
+                "escpos_table": et,
                 "esc_r": (tf_esc_r.value or "").strip(),
             }
 
@@ -2434,6 +2743,112 @@ def main(page: ft.Page):
                     style=ft.ButtonStyle(bgcolor=UI_ACCENT, color=UI_TEXT_ON_YELLOW),
                     on_click=do_save,
                 ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        page.show_dialog(dlg)
+
+    def open_brand_settings_menu(_):
+        def close_menu(_e=None):
+            page.pop_dialog()
+            page.update()
+
+        def pick_printer(_e):
+            page.pop_dialog()
+            page.update()
+            open_printer_settings_dlg(_e)
+
+        def pick_scales(_e):
+            page.pop_dialog()
+            page.update()
+            open_scale_settings_dlg(_e)
+
+        def pick_logout(_e):
+            page.pop_dialog()
+            page.update()
+            logout(_e)
+
+        def on_fullscreen_change(e: ft.ControlEvent):
+            page.window.full_screen = bool(e.control.value)
+            page.update()
+
+        def add_autostart(_e):
+            ok, msg = install_windows_autostart_shortcut()
+            if ok:
+                snack("Автозагрузка: ярлык создан в папке «Автозагрузка»", ft.Colors.GREEN_700)
+            else:
+                snack(f"Автозагрузка: {msg}", ft.Colors.RED_700)
+
+        menu_rows: list[ft.Control] = [
+            ft.ListTile(
+                leading=ft.Icon(ft.Icons.PRINT_OUTLINED, color=UI_TEXT),
+                title=ft.Text("Принтер"),
+                on_click=pick_printer,
+            ),
+        ]
+        if scale_feature_enabled:
+            menu_rows.append(
+                ft.ListTile(
+                    leading=ft.Icon(ft.Icons.SCALE_OUTLINED, color=UI_TEXT),
+                    title=ft.Text("Весы (COM)"),
+                    on_click=pick_scales,
+                )
+            )
+        menu_rows.extend(
+            [
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+                    content=ft.Switch(
+                        label="Полноэкранный режим",
+                        value=page.window.full_screen,
+                        on_change=on_fullscreen_change,
+                    ),
+                ),
+                ft.ListTile(
+                    leading=ft.Icon(ft.Icons.START, color=UI_TEXT),
+                    title=ft.Text("Автозагрузка Windows"),
+                    subtitle=ft.Text(
+                        "Ярлык в меню Пуск → Программы → Автозагрузка",
+                        size=11,
+                        color=UI_MUTED,
+                    ),
+                    on_click=add_autostart,
+                ),
+                ft.ListTile(
+                    leading=ft.Icon(ft.Icons.LOGOUT, color=ft.Colors.RED_700),
+                    title=ft.Text("Выйти из аккаунта", color=ft.Colors.RED_700),
+                    on_click=pick_logout,
+                ),
+            ]
+        )
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            bgcolor=UI_SURFACE,
+            shape=ft.RoundedRectangleBorder(radius=16),
+            title=ft.Row(
+                [
+                    ft.Icon(ft.Icons.SETTINGS_OUTLINED, color=UI_ACCENT),
+                    ft.Text(
+                        "Настройки",
+                        size=20,
+                        weight=ft.FontWeight.W_600,
+                        color=UI_TEXT,
+                    ),
+                ],
+                spacing=8,
+            ),
+            content=ft.Container(
+                content=ft.Column(
+                    menu_rows,
+                    tight=True,
+                    spacing=0,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+                width=420,
+            ),
+            actions=[
+                ft.TextButton("Закрыть", on_click=close_menu),
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
@@ -2724,6 +3139,13 @@ def main(page: ft.Page):
         col_left_children.extend(
             [
                 ft.Text("Поиск товаров", size=11, weight=ft.FontWeight.W_600, color=UI_MUTED),
+                ft.Text(
+                    ref=cashier_hint_ref,
+                    value="",
+                    size=12,
+                    color=UI_WARN_TEXT,
+                    visible=False,
+                ),
                 scan_block,
                 search_list_panel,
             ]
@@ -2795,46 +3217,17 @@ def main(page: ft.Page):
                 on_click=lambda e: try_start_sale(),
             ),
             ft.OutlinedButton(
-                "Принтер",
-                icon=ft.Icons.PRINT_OUTLINED,
-                tooltip="Настройка термопринтера чека",
+                "Закрыть смену",
+                icon=ft.Icons.LOCK_CLOCK,
+                tooltip="Закрыть текущую смену кассира",
                 style=ft.ButtonStyle(
                     color=UI_MUTED,
                     side=ft.BorderSide(1, UI_BORDER),
                     shape=ft.RoundedRectangleBorder(radius=10),
                 ),
-                on_click=open_printer_settings_dlg,
+                on_click=close_shift_click,
             ),
         ]
-        if scale_feature_enabled:
-            _hdr_btns.append(
-                ft.OutlinedButton(
-                    "Весы",
-                    icon=ft.Icons.SCALE_OUTLINED,
-                    tooltip="COM-порт весов и LPT для тестовой печати",
-                    style=ft.ButtonStyle(
-                        color=UI_MUTED,
-                        side=ft.BorderSide(1, UI_BORDER),
-                        shape=ft.RoundedRectangleBorder(radius=10),
-                    ),
-                    on_click=open_scale_settings_dlg,
-                )
-            )
-        _hdr_btns.extend(
-            [
-                ft.OutlinedButton(
-                    "Закрыть смену",
-                    icon=ft.Icons.LOCK_CLOCK,
-                    tooltip="Закрыть текущую смену кассира",
-                    style=ft.ButtonStyle(
-                        color=UI_MUTED,
-                        side=ft.BorderSide(1, UI_BORDER),
-                        shape=ft.RoundedRectangleBorder(radius=10),
-                    ),
-                    on_click=close_shift_click,
-                ),
-            ]
-        )
         header_toolbar = ft.Row(_hdr_btns, spacing=8, tight=True)
 
         company_short = (str(company)[:28] + "…") if len(str(company)) > 30 else str(company)
@@ -2953,6 +3346,18 @@ def main(page: ft.Page):
                         tight=True,
                         alignment=ft.MainAxisAlignment.CENTER,
                     ),
+                    ft.Container(width=8),
+                    ft.IconButton(
+                        icon=ft.Icons.SETTINGS_OUTLINED,
+                        icon_size=22,
+                        icon_color=UI_SIDEBAR_TEXT,
+                        tooltip="Настройки: принтер, весы, автозагрузка, выход",
+                        style=ft.ButtonStyle(
+                            bgcolor=ft.Colors.TRANSPARENT,
+                            overlay_color=ft.Colors.with_opacity(0.12, "#FFFFFF"),
+                        ),
+                        on_click=open_brand_settings_menu,
+                    ),
                     ft.Container(expand=True),
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -2991,6 +3396,8 @@ def main(page: ft.Page):
 
         async def _win_center_window():
             try:
+                if page.window.full_screen:
+                    return
                 await page.window.wait_until_ready_to_show()
                 await page.window.center()
             except Exception:

@@ -1,7 +1,7 @@
 """
 Локальный кэш карточек товаров (SQLite, WAL) для ускорения сканирования.
-Штрихкод → product_id: при попадании в кэш вызывается pos_add_item вместо pos_scan (меньше работы на сервере).
-При ошибке add_item выполняется обычный pos_scan; кэш пополняется из ответов корзины и поиска.
+Штрихкод → product_id (+ unit): pos_add_item только если единица не «кг» (иначе в чек ушло бы 1 шт без веса).
+Для unit=кг всегда pos_scan; кэш пополняется из списка товаров, корзины и поиска.
 """
 
 from __future__ import annotations
@@ -55,6 +55,9 @@ def _init_schema(c: sqlite3.Connection) -> None:
         )
         """
     )
+    cols = {row[1] for row in c.execute("PRAGMA table_info(products)").fetchall()}
+    if "unit" not in cols:
+        c.execute("ALTER TABLE products ADD COLUMN unit TEXT")
     c.execute(
         "CREATE INDEX IF NOT EXISTS idx_products_branch_pid ON products(branch_id, product_id)"
     )
@@ -125,12 +128,20 @@ def _product_price(p: dict[str, Any]) -> str | None:
     return None
 
 
+def _product_unit(p: dict[str, Any]) -> str | None:
+    v = p.get("unit")
+    if v is not None and str(v).strip():
+        return str(v).strip()
+    return None
+
+
 def upsert_row(
     branch_id: str | None,
     barcode: str,
     product_id: str,
     name: str | None = None,
     price: str | None = None,
+    unit: str | None = None,
 ) -> None:
     if not _enabled():
         return
@@ -146,21 +157,28 @@ def upsert_row(
             _init_schema(c)
             c.execute(
                 """
-                INSERT INTO products (branch_id, barcode, product_id, name, price, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO products (branch_id, barcode, product_id, name, price, unit, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(branch_id, barcode) DO UPDATE SET
                     product_id = excluded.product_id,
                     name = COALESCE(excluded.name, products.name),
                     price = COALESCE(excluded.price, products.price),
+                    unit = COALESCE(excluded.unit, products.unit),
                     updated_at = excluded.updated_at
                 """,
-                (bk, bc, pid, name, price, now),
+                (bk, bc, pid, name, price, unit, now),
             )
         finally:
             c.close()
 
 
 def get_cached_product_id(branch_id: str | None, barcode: str) -> str | None:
+    row = get_cached_scan_row(branch_id, barcode)
+    return str(row["product_id"]) if row else None
+
+
+def get_cached_scan_row(branch_id: str | None, barcode: str) -> dict[str, Any] | None:
+    """Кэш по штрихкоду: product_id и unit (кг/шт) для выбора pos_add_item vs pos_scan."""
     if not _enabled():
         return None
     bc = _norm_barcode(barcode)
@@ -172,16 +190,21 @@ def get_cached_product_id(branch_id: str | None, barcode: str) -> str | None:
         try:
             _init_schema(c)
             row = c.execute(
-                "SELECT product_id FROM products WHERE branch_id = ? AND barcode = ?",
+                "SELECT product_id, unit FROM products WHERE branch_id = ? AND barcode = ?",
                 (bk, bc),
             ).fetchone()
-            if row:
-                return str(row["product_id"])
+            if not row:
+                return None
+            uid = row["product_id"]
+            if uid is None:
+                return None
+            u = row["unit"]
+            unit_s = str(u).strip() if u is not None and str(u).strip() else None
+            return {"product_id": str(uid), "unit": unit_s}
         except sqlite3.Error:
             return None
         finally:
             c.close()
-    return None
 
 
 def ingest_product_dict(branch_id: str | None, p: dict[str, Any], barcode_hint: str | None = None) -> None:
@@ -193,7 +216,9 @@ def ingest_product_dict(branch_id: str | None, p: dict[str, Any], barcode_hint: 
     bc = _norm_barcode(barcode_hint or "") or _product_barcode(p)
     if not bc:
         return
-    upsert_row(branch_id, bc, pid, _product_name(p), _product_price(p))
+    upsert_row(
+        branch_id, bc, pid, _product_name(p), _product_price(p), unit=_product_unit(p)
+    )
 
 
 def ingest_product_list(branch_id: str | None, products: list) -> None:
@@ -201,7 +226,7 @@ def ingest_product_list(branch_id: str | None, products: list) -> None:
         return
     bk = _branch_key(branch_id)
     now = time.time()
-    rows: list[tuple[str, str, str, str | None, str | None, float]] = []
+    rows: list[tuple[str, str, str, str | None, str | None, str | None, float]] = []
     for p in products:
         if not isinstance(p, dict):
             continue
@@ -211,7 +236,9 @@ def ingest_product_list(branch_id: str | None, products: list) -> None:
         bc = _product_barcode(p)
         if not bc:
             continue
-        rows.append((bk, bc, pid, _product_name(p), _product_price(p), now))
+        rows.append(
+            (bk, bc, pid, _product_name(p), _product_price(p), _product_unit(p), now)
+        )
     if not rows:
         return
     with _lock:
@@ -220,12 +247,13 @@ def ingest_product_list(branch_id: str | None, products: list) -> None:
             _init_schema(c)
             c.executemany(
                 """
-                INSERT INTO products (branch_id, barcode, product_id, name, price, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO products (branch_id, barcode, product_id, name, price, unit, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(branch_id, barcode) DO UPDATE SET
                     product_id = excluded.product_id,
                     name = COALESCE(excluded.name, products.name),
                     price = COALESCE(excluded.price, products.price),
+                    unit = COALESCE(excluded.unit, products.unit),
                     updated_at = excluded.updated_at
                 """,
                 rows,
@@ -242,7 +270,7 @@ def ingest_cart(branch_id: str | None, cart: dict[str, Any]) -> None:
         return
     bk = _branch_key(branch_id)
     now = time.time()
-    rows: list[tuple[str, str, str, str | None, str | None, float]] = []
+    rows: list[tuple[str, str, str, str | None, str | None, str | None, float]] = []
     for it in items:
         if not isinstance(it, dict):
             continue
@@ -264,9 +292,11 @@ def ingest_cart(branch_id: str | None, cart: dict[str, Any]) -> None:
             continue
         name = None
         price = None
+        unt: str | None = None
         if isinstance(prod, dict):
             name = _product_name(prod)
             price = _product_price(prod)
+            unt = _product_unit(prod)
         if name is None:
             name = _name_from_item(it)
         if price is None:
@@ -275,7 +305,11 @@ def ingest_cart(branch_id: str | None, cart: dict[str, Any]) -> None:
                 if v is not None and str(v).strip():
                     price = str(v).strip()
                     break
-        rows.append((bk, bc, pid_s, name, price, now))
+        if unt is None:
+            u = it.get("unit")
+            if u is not None and str(u).strip():
+                unt = str(u).strip()
+        rows.append((bk, bc, pid_s, name, price, unt, now))
     if not rows:
         return
     with _lock:
@@ -284,12 +318,13 @@ def ingest_cart(branch_id: str | None, cart: dict[str, Any]) -> None:
             _init_schema(c)
             c.executemany(
                 """
-                INSERT INTO products (branch_id, barcode, product_id, name, price, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO products (branch_id, barcode, product_id, name, price, unit, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(branch_id, barcode) DO UPDATE SET
                     product_id = excluded.product_id,
                     name = COALESCE(excluded.name, products.name),
                     price = COALESCE(excluded.price, products.price),
+                    unit = COALESCE(excluded.unit, products.unit),
                     updated_at = excluded.updated_at
                 """,
                 rows,

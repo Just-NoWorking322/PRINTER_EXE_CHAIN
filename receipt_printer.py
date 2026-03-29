@@ -4,6 +4,7 @@
 Cashino EP-200: в самотесте часто «по умолчанию: CP936 GBK». Для кириллицы: кодировка WPC1251/cp1251
 (или cp866), слот ESC t 46 или 17; перед ESC t всегда шлём ESC % 0 (выход из двухбайтового режима),
 если не отключено DESKTOP_MARKET_RECEIPT_NO_ESC_PCT=1. Профиль TEP-200M в python-escpos — по желанию.
+Опционально: DESKTOP_MARKET_RECEIPT_COERCE_CP866_TABLE=1 — при CP866 принудительно заменить ESC t 46 на 17 (по умолчанию выкл., слот не трогаем).
 
 Требуется: pip install python-escpos
 Для COM (USB-принтер как виртуальный порт): укажите порт COM в конфиге.
@@ -34,11 +35,63 @@ def _money(v: Any) -> str:
         return "0.00"
 
 
+def _first_nonempty_str(*vals: Any) -> str | None:
+    for v in vals:
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip():
+            return v
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            s = str(v)
+            if s.strip():
+                return s
+    return None
+
+
+def _name_from_product_dict(p: dict[str, Any]) -> str | None:
+    if not p:
+        return None
+    return _first_nonempty_str(
+        p.get("name"),
+        p.get("title"),
+        p.get("display_name"),
+        p.get("name_ru"),
+        p.get("title_ru"),
+        p.get("full_name"),
+        p.get("label"),
+    )
+
+
 def _item_title(it: dict[str, Any]) -> str:
+    """Имя позиции как на экране кассы: product → product_snapshot → поля строки."""
     p = it.get("product")
     if isinstance(p, dict):
-        return str(p.get("name") or p.get("title") or "—")
-    return str(it.get("product_name") or it.get("name") or "—")
+        n = _name_from_product_dict(p)
+        if n:
+            return n
+    snap = it.get("product_snapshot")
+    if isinstance(snap, dict):
+        n = _name_from_product_dict(snap)
+        if n:
+            return n
+    for k in (
+        "product_name",
+        "name",
+        "title",
+        "display_name",
+        "label",
+        "item_name",
+        "description",
+    ):
+        v = it.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    pid = it.get("product_id")
+    if pid is None and p is not None and not isinstance(p, dict):
+        pid = p
+    if pid is not None and str(pid).strip():
+        return f"Товар #{pid}"
+    return "—"
 
 
 def _line_amount(it: dict[str, Any]) -> str:
@@ -73,6 +126,12 @@ def _line_amount(it: dict[str, Any]) -> str:
 
 # Ширина строки для 58 мм (Font A ~32 символа)
 RECEIPT_WIDTH = 32
+
+
+def _dashed_rule(width: int = RECEIPT_WIDTH) -> str:
+    """Пунктирная линия как на типовом товарном чеке."""
+    s = ("- " * ((width // 2) + 2))[:width]
+    return s if s else "-" * width
 
 
 def _money_display(v: Any) -> str:
@@ -114,6 +173,25 @@ def _pad_left_right(left: str, right: str, width: int = RECEIPT_WIDTH) -> str:
     return left + (" " * gap) + right
 
 
+def _pad_center(text: str, width: int = RECEIPT_WIDTH) -> str:
+    """Центр без ESC a 1: на части Cashino/EP-200 после выравнивания по центру ломается кириллица."""
+    t = (text or "").strip()
+    if not t:
+        return " " * width
+    if len(t) >= width:
+        return t[:width]
+    pad = width - len(t)
+    left = pad // 2
+    return (" " * left + t + " " * (pad - left))[:width]
+
+
+def _receipt_safe_chars(text: str) -> str:
+    """U+2116 № в слотах 17/46 часто нет или портит поток; заменяем на латиницу."""
+    if not text:
+        return text
+    return text.replace("\u2116", "N").replace("№", "N")
+
+
 def _raw_esc_bold(p: Any, on: bool) -> None:
     p._raw(b"\x1b\x45" + bytes([1 if on else 0]))
 
@@ -124,8 +202,10 @@ def _raw_esc_align(p: Any, mode: int) -> None:
 
 
 def _emit_line_encoded(p: Any, codec: str, text: str) -> None:
+    """Строгая таблица ESC/POS: символы вне кодировки заменяются, печать не обрывается."""
+    text = _receipt_safe_chars(str(text))
     try:
-        p._raw(text.encode(codec) + b"\n")
+        p._raw(text.encode(codec, errors="replace") + b"\n")
     except LookupError:
         p._raw(text.encode("cp866", errors="replace") + b"\n")
 
@@ -144,7 +224,9 @@ def _looks_like_amount(text: str) -> bool:
 ReceiptRow = tuple[Any, ...]
 
 
-def _emit_receipt_rows(p: Any, codec: str, rows: list[ReceiptRow]) -> None:
+def _emit_receipt_rows(
+    p: Any, codec: str, rows: list[ReceiptRow], user_enc: str = ""
+) -> None:
     """Печать строк чека: жирный/центр через сырые ESC (без p.set — не сбрасывать кодовую страницу)."""
     for row in rows:
         if not row:
@@ -153,33 +235,44 @@ def _emit_receipt_rows(p: Any, codec: str, rows: list[ReceiptRow]) -> None:
         if kind == "sep":
             _raw_esc_align(p, 0)
             _raw_esc_bold(p, False)
+            _emit_line_encoded(p, codec, _dashed_rule())
+        elif kind == "sep_solid":
+            _raw_esc_align(p, 0)
+            _raw_esc_bold(p, False)
             _emit_line_encoded(p, codec, "-" * RECEIPT_WIDTH)
         elif kind == "blank":
             p._raw(b"\n")
         elif kind == "center_bold":
-            _raw_esc_align(p, 1)
+            _raw_esc_align(p, 0)
             _raw_esc_bold(p, True)
-            _emit_line_encoded(p, codec, str(row[1]))
+            _emit_line_encoded(p, codec, _pad_center(str(row[1])))
             _raw_esc_bold(p, False)
-            _raw_esc_align(p, 0)
         elif kind == "center":
-            _raw_esc_align(p, 1)
-            _raw_esc_bold(p, False)
-            _emit_line_encoded(p, codec, str(row[1]))
             _raw_esc_align(p, 0)
+            _raw_esc_bold(p, False)
+            _emit_line_encoded(p, codec, _pad_center(str(row[1])))
         elif kind == "left":
             _raw_esc_align(p, 0)
             _raw_esc_bold(p, False)
             _emit_line_encoded(p, codec, str(row[1]))
         elif kind == "lr":
+            # На EP-200 обычный шрифт иногда даёт другую интерпретацию байт; жирный совпадает с «ИТОГ».
             _raw_esc_align(p, 0)
-            _raw_esc_bold(p, False)
+            _raw_esc_bold(p, True)
             _emit_line_encoded(p, codec, _pad_left_right(str(row[1]), str(row[2])))
+            _raw_esc_bold(p, False)
         elif kind == "lr_bold":
             _raw_esc_align(p, 0)
             _raw_esc_bold(p, True)
             _emit_line_encoded(p, codec, _pad_left_right(str(row[1]), str(row[2])))
             _raw_esc_bold(p, False)
+        elif kind == "right":
+            _raw_esc_align(p, 2)
+            _raw_esc_bold(p, False)
+            _emit_line_encoded(p, codec, str(row[1]))
+            _raw_esc_align(p, 0)
+            if user_enc:
+                _touch_codepage_after_esc_a(p, user_enc)
         else:
             _raw_esc_align(p, 0)
             _emit_line_encoded(p, codec, str(row[-1]))
@@ -236,62 +329,91 @@ def _compose_sale_receipt_rows(
     company: str = "",
     cashier: str = "",
 ) -> list[ReceiptRow]:
-    """company/cashier оставлены в сигнатуре для совместимости с print_sale_receipt."""
+    """Макет как у типового товарного чека: магазин, дата, позиции, оплата, продавец."""
     items = cart.get("items") or cart.get("cart_items") or []
     if not isinstance(items, list):
         items = []
+    valid_items = [it for it in items if isinstance(it, dict)]
 
     st = cart.get("subtotal")
     disc = cart.get("discount_total")
     tot = _cart_total(cart)
 
-    rows: list[ReceiptRow] = [
-        ("sep",),
-        ("center", "Добро пожаловать!"),
-    ]
-    if sale_id is not None:
-        sid = str(sale_id)
-        sid_show = sid[:10] + "…" if len(sid) > 12 else sid
+    company_clean = (company or "").strip()
+    if company_clean in ("—", "-", "none", "null"):
+        company_clean = ""
+
+    rows: list[ReceiptRow] = []
+
+    if company_clean:
+        for ln in _wrap_to_width(company_clean, RECEIPT_WIDTH):
+            rows.append(("center_bold", ln))
+        rows.append(("blank",))
+
+    rows.append(("center", "Добро пожаловать!"))
+    rows.append(("blank",))
+
+    if sale_id is not None and str(sale_id).strip():
+        sid = str(sale_id).strip()
+        sid_show = sid if len(sid) <= 14 else (sid[:12] + "…")
         rows.append(("center_bold", f"Товарный чек № {sid_show}"))
     else:
         rows.append(("center_bold", "Товарный чек"))
     rows.append(("center", f"от {datetime.now().strftime('%d.%m.%Y %H:%M')}"))
     rows.append(("sep",))
 
-    for idx, it in enumerate(items, start=1):
-        if not isinstance(it, dict):
-            continue
+    first_line = True
+    for idx, it in enumerate(valid_items, start=1):
+        if not first_line:
+            rows.append(("blank",))
+        first_line = False
         title = _item_title(it)
-        block = _wrap_to_width(f"{idx}. {title}")
+        block = _wrap_to_width(f"{idx}. {title}", RECEIPT_WIDTH)
         for ln in block:
             rows.append(("left", ln))
         up = _money_display(it.get("unit_price"))
-        qty = _qty_display(it.get("quantity", "1"))
+        qty = _qty_display(it.get("quantity", "1")).replace(".", ",")
         lam = _money_display(_line_amount(it))
-        rows.append(("left", f"  {up} x {qty} = {lam}"))
+        calc = f"{up} x {qty} = {lam}"
+        rows.append(("right", calc))
 
     rows.append(("sep",))
+
     try:
         dval = float(disc) if disc is not None else 0.0
     except (TypeError, ValueError):
         dval = 0.0
     rows.append(("lr", "Подытог:", _money_display(st)))
     if abs(dval) > 0.001:
-        rows.append(("lr", "Скидка:", _money_display(dval)))
+        rows.append(("lr", "Скидка:", _money_display(abs(dval))))
 
     pm_label = (
         "Наличные"
         if payment_method == "cash"
         else ("Безнал" if payment_method == "transfer" else str(payment_method))
     )
-    rows.append(("lr_bold", "ИТОГ:", _money_display(tot)))
     rows.append(("lr", pm_label, _money_display(tot)))
+    rows.append(("lr_bold", "ИТОГ:", _money_display(tot)))
     if payment_method == "cash" and cash_received:
         rows.append(("lr", "Получено:", _money_display(cash_received)))
     if change_amount is not None:
-        rows.append(("lr", "Сдача:", _money_display(change_amount)))
+        try:
+            chf = float(change_amount)
+        except (TypeError, ValueError):
+            chf = None
+        if chf is not None:
+            rows.append(("lr", "Сдача:", _money_display(chf)))
+
     rows.append(("sep",))
+
+    cashier_clean = (cashier or "").strip()
+    if cashier_clean and cashier_clean not in ("—", "-", "none", "null"):
+        rows.append(("left", f"Продавец: {cashier_clean}"))
+        rows.append(("blank",))
+
     rows.append(("center_bold", "Спасибо за покупку!"))
+    if company_clean:
+        rows.append(("center", company_clean))
     rows.append(("blank",))
     return rows
 
@@ -475,6 +597,17 @@ def _resolve_codec_and_table(user_enc: str) -> tuple[str, int]:
                 table = _default_escpos_table_byte(user_enc)
         except (TypeError, ValueError):
             table = _default_escpos_table_byte(user_enc)
+    if os.environ.get("DESKTOP_MARKET_RECEIPT_COERCE_CP866_TABLE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        c = (codec or "cp866").strip().lower()
+        t = int(table) & 0xFF
+        if c == "cp866" and t == 46:
+            logger.warning("COERCE_CP866_TABLE: ESC t 46 → 17 при CP866")
+            table = 17
     return codec, table
 
 
@@ -502,12 +635,25 @@ def _apply_escpos_codepage(p: Any, user_enc: str) -> str:
     return codec
 
 
+def _touch_codepage_after_esc_a(p: Any, user_enc: str) -> None:
+    """
+    После ESC a (выравнивание) часть термопринтеров (Cashino EP-200 и др.) снова уходит в CP936/GBK.
+    Короткий повтор ESC % 0 + ESC t без полного init сохраняет читаемую кириллицу на следующих строках.
+    """
+    if not (user_enc or "").strip():
+        return
+    _, table = _resolve_codec_and_table(user_enc)
+    if not _env_no_esc_pct():
+        p._raw(b"\x1b\x25\x00")
+    p._raw(b"\x1b\x74" + bytes([table & 0xFF]))
+
+
 def _emit_raw_lines(p: Any, lines: list[str], codec: str) -> None:
     """Только печать строк в уже выбранной таблице ESC t."""
     for s in lines:
         chunk = (s or "") + "\n"
         try:
-            p._raw(chunk.encode(codec))
+            p._raw(chunk.encode(codec, errors="replace"))
         except LookupError:
             p._raw(chunk.encode("cp866", errors="replace"))
 
@@ -631,7 +777,7 @@ def print_escpos_text_file(devfile: str, text: str) -> None:
         p.set(align="left", font="a")
         _apply_escpos_codepage(p, user_enc)
         rows = _plain_lines_to_receipt_rows(lines)
-        _emit_receipt_rows(p, codec, rows)
+        _emit_receipt_rows(p, codec, rows, user_enc)
         _safe_cut(p)
     finally:
         try:
@@ -660,7 +806,7 @@ def print_receipt_text(text: str) -> None:
         p.set(align="left", font="a")
         _apply_escpos_codepage(p, user_enc)
         rows = _plain_lines_to_receipt_rows(lines)
-        _emit_receipt_rows(p, codec, rows)
+        _emit_receipt_rows(p, codec, rows, user_enc)
         _safe_cut(p)
     finally:
         try:
@@ -701,7 +847,7 @@ def print_sale_receipt(
         codec = _apply_escpos_codepage(p, user_enc)
         p.set(align="left", font="a")
         _apply_escpos_codepage(p, user_enc)
-        _emit_receipt_rows(p, codec, rows)
+        _emit_receipt_rows(p, codec, rows, user_enc)
         _safe_cut(p)
     finally:
         try:
