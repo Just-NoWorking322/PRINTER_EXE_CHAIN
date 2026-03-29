@@ -32,6 +32,7 @@ import requests
 
 from api_client import ApiError, JwtClient
 from config import API_BASE_URL, TEST_LOGIN_EMAIL, TEST_LOGIN_PASSWORD
+import local_products_cache
 import config
 import printer_config
 from receipt_printer import (
@@ -570,6 +571,7 @@ def main(page: ft.Page):
     printer_config.load_from_disk()
 
     client = JwtClient()
+    local_products_cache.init_db()
     session: dict[str, Any] = {
         "cart_id": None,
         "cart": {},
@@ -655,6 +657,10 @@ def main(page: ft.Page):
         sid = _shift_id_from_cart(cart)
         if sid:
             session["active_shift_id"] = sid
+        try:
+            local_products_cache.ingest_cart(client.active_branch_id, cart)
+        except Exception:
+            pass
         render_cart_items()
 
     def on_print_weight_click(_):
@@ -1106,6 +1112,10 @@ def main(page: ft.Page):
                 sid = _shift_id_from_cart(cart)
                 if sid:
                     session["active_shift_id"] = sid
+                try:
+                    local_products_cache.ingest_cart(client.active_branch_id, cart)
+                except Exception:
+                    pass
                 set_shift_banner(False)
                 render_cart_items()
                 snack("Продажа начата", ft.Colors.GREEN_700)
@@ -1148,15 +1158,28 @@ def main(page: ft.Page):
         cid_s = str(cid)
 
         async def _scan_task():
-            try:
-                cart = await asyncio.to_thread(client.pos_scan, cid_s, code)
-            except ApiError as ex:
-                if seq == session.get("scan_seq"):
-                    show_error(str(ex))
-                return
+            branch = client.active_branch_id
+            cached_pid = local_products_cache.get_cached_product_id(branch, code)
+            cart: dict[str, Any] | None = None
+            if cached_pid:
+                try:
+                    cart = await asyncio.to_thread(client.pos_add_item, cid_s, cached_pid)
+                except ApiError:
+                    cart = None
+            if cart is None:
+                try:
+                    cart = await asyncio.to_thread(client.pos_scan, cid_s, code)
+                except ApiError as ex:
+                    if seq == session.get("scan_seq"):
+                        show_error(str(ex))
+                    return
             if seq != session.get("scan_seq"):
                 return
             session["cart"] = cart
+            try:
+                local_products_cache.ingest_cart(branch, cart)
+            except Exception:
+                pass
             render_cart_items()
             page.update()
 
@@ -1209,6 +1232,12 @@ def main(page: ft.Page):
                 resp = await asyncio.to_thread(client.pos_add_item, cid, product_id)
                 if not _apply_cart_from_response(resp):
                     await _reload_cart_async()
+                try:
+                    local_products_cache.ingest_cart(
+                        client.active_branch_id, session.get("cart") or {}
+                    )
+                except Exception:
+                    pass
                 if search_field_ref.current:
                     search_field_ref.current.value = ""
                 clear_search_results()
@@ -1297,6 +1326,12 @@ def main(page: ft.Page):
             set_loading(True)
             try:
                 products = await asyncio.to_thread(client.products_search, q)
+                try:
+                    local_products_cache.ingest_product_list(
+                        client.active_branch_id, products
+                    )
+                except Exception:
+                    pass
                 _fill_search_results(products)
                 page.update()
             except ApiError as ex:

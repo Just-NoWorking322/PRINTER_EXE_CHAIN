@@ -25,6 +25,11 @@ dist/
 # Local printer and app settings (пути COM, VID/PID и т.д.)
 printer_settings.json
 
+# Локальный кэш штрихкодов (SQLite WAL)
+pos_products_cache.sqlite3
+pos_products_cache.sqlite3-wal
+pos_products_cache.sqlite3-shm
+
 # IDE / editors
 .idea/
 .vscode/
