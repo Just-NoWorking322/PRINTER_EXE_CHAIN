@@ -1,25 +1,20 @@
 """
-Локальные настройки термопринтера: файл printer_settings.json рядом с приложением.
+Локальные настройки термопринтера: JSON в SQLite (единый файл NurMarketKassa.sqlite3).
 Перекрывают значения из config.py (которые берутся из переменных окружения при импорте).
 """
 
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
-SETTINGS_FILENAME = "printer_settings.json"
-
 
 def settings_path() -> Path:
-    """
-    Рядом с exe (PyInstaller onefile) или рядом с printer_config.py при запуске из исходников.
-    """
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / SETTINGS_FILENAME
-    return Path(__file__).resolve().parent / SETTINGS_FILENAME
+    """Путь к единому файлу данных приложения (SQLite), рядом с exe или с модулем."""
+    import app_database
+
+    return app_database.data_db_path()
 
 
 def as_dict() -> dict[str, Any]:
@@ -108,14 +103,16 @@ def apply(data: dict[str, Any]) -> None:
 
 
 def load_from_disk() -> bool:
-    """Загрузить printer_settings.json при наличии. Возвращает True, если файл прочитан."""
-    p = settings_path()
-    if not p.is_file():
+    """Загрузить настройки из SQLite (kv_store). Возвращает True, если запись есть."""
+    import app_database
+
+    app_database.init_database()
+    raw = app_database.kv_get(app_database.KV_KEY_PRINTER)
+    if not raw:
         return False
     try:
-        raw = p.read_text(encoding="utf-8")
         data = json.loads(raw)
-    except (OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return False
     if isinstance(data, dict):
         apply(data)
@@ -124,9 +121,14 @@ def load_from_disk() -> bool:
 
 
 def save(data: dict[str, Any]) -> None:
-    """Применить и записать JSON на диск. Поля из data перекрывают текущие; остальные ключи сохраняются."""
+    """Применить и сохранить JSON в SQLite. Поля из data перекрывают текущие; остальные ключи сохраняются."""
+    import app_database
+
     merged = as_dict()
     merged.update(data)
     apply(merged)
-    p = settings_path()
-    p.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    app_database.init_database()
+    app_database.kv_set(
+        app_database.KV_KEY_PRINTER,
+        json.dumps(merged, ensure_ascii=False),
+    )

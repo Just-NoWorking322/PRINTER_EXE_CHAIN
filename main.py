@@ -37,6 +37,7 @@ import requests
 
 from api_client import ApiError, JwtClient
 from config import API_BASE_URL, TEST_LOGIN_EMAIL, TEST_LOGIN_PASSWORD
+import app_database
 import local_products_cache
 import config
 import printer_config
@@ -696,6 +697,7 @@ def main(page: ft.Page):
     page.window.prevent_close = False
     page.padding = 0
 
+    app_database.init_database()
     printer_config.load_from_disk()
 
     client = JwtClient()
@@ -2507,7 +2509,7 @@ def main(page: ft.Page):
                 content=ft.Column(
                     [
                         ft.Text(
-                            f"Файл настроек: {printer_config.settings_path()}",
+                            f"Файл данных (SQLite): {printer_config.settings_path()}",
                             size=11,
                             color=UI_MUTED,
                             selectable=True,
@@ -2702,7 +2704,7 @@ def main(page: ft.Page):
                 content=ft.Column(
                     [
                         ft.Text(
-                            f"Файл: {printer_config.settings_path()} (те же настройки, что и у принтера)",
+                            f"Данные в: {printer_config.settings_path()} (общий файл с кэшем товаров)",
                             size=11,
                             color=UI_MUTED,
                             selectable=True,

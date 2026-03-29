@@ -1,5 +1,5 @@
 """
-Локальный кэш карточек товаров (SQLite, WAL) для ускорения сканирования.
+Локальный кэш карточек товаров (SQLite, тот же файл NurMarketKassa.sqlite3, что и настройки).
 Штрихкод → product_id (+ unit): pos_add_item только если единица не «кг» (иначе в чек ушло бы 1 шт без веса).
 Для unit=кг всегда pos_scan; кэш пополняется из списка товаров, корзины и поиска.
 """
@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import sys
 import threading
 import time
 from pathlib import Path
@@ -25,19 +24,16 @@ def _enabled() -> bool:
 
 
 def cache_db_path() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / "pos_products_cache.sqlite3"
-    return Path(__file__).resolve().parent / "pos_products_cache.sqlite3"
+    import app_database
+
+    return app_database.data_db_path()
 
 
 def _connect() -> sqlite3.Connection:
-    path = cache_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=15.0, isolation_level=None)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA temp_store=MEMORY")
-    conn.row_factory = sqlite3.Row
+    import app_database
+
+    app_database.init_database()
+    conn = app_database.connect()
     return conn
 
 
@@ -66,6 +62,9 @@ def _init_schema(c: sqlite3.Connection) -> None:
 def init_db() -> None:
     if not _enabled():
         return
+    import app_database
+
+    app_database.init_database()
     with _lock:
         c = _connect()
         try:

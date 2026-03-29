@@ -48,7 +48,7 @@ _ep = os.environ.get("DESKTOP_MARKET_RECEIPT_PROFILE", "").strip()
 RECEIPT_ESCPOS_PROFILE = _ep if _ep else None
 # Перед ESC t на EP-200/аналогах шлётся ESC % 0 (cp1251/wpc1251, слот 46, cp866+17 и т.д.); отключить: DESKTOP_MARKET_RECEIPT_NO_ESC_PCT=1
 
-# Весы (COM) и LPT для тестовой печати веса — перекрываются printer_settings.json
+# Весы (COM) и LPT для тестовой печати веса — перекрываются JSON в NurMarketKassa.sqlite3
 SCALE_COM_PORT = os.environ.get("DESKTOP_MARKET_SCALE_PORT", "COM3").strip() or "COM3"
 try:
     SCALE_COM_BAUD = int(os.environ.get("DESKTOP_MARKET_SCALE_BAUD", "9600"), 0)
