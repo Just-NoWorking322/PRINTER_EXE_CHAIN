@@ -21,18 +21,9 @@ def as_dict() -> dict[str, Any]:
     import config as c
 
     return {
-        "backend": getattr(c, "RECEIPT_PRINTER_BACKEND", "none"),
-        "serial_port": getattr(c, "RECEIPT_SERIAL_PORT", "COM3"),
-        "serial_baud": getattr(c, "RECEIPT_SERIAL_BAUDRATE", 9600),
-        "network_host": getattr(c, "RECEIPT_NETWORK_HOST", ""),
-        "network_port": getattr(c, "RECEIPT_NETWORK_PORT", 9100),
-        "file_path": getattr(c, "RECEIPT_FILE_PATH", ""),
-        "win32_name": getattr(c, "RECEIPT_WIN32_NAME", ""),
-        "usb_vendor": getattr(c, "RECEIPT_USB_VENDOR", ""),
-        "usb_product": getattr(c, "RECEIPT_USB_PRODUCT", ""),
-        "usb_in_ep": getattr(c, "RECEIPT_USB_IN_EP", 0x82),
-        "usb_out_ep": getattr(c, "RECEIPT_USB_OUT_EP", 0x01),
-        "text_encoding": getattr(c, "RECEIPT_TEXT_ENCODING", "cp866"),
+        "backend": "lpt",
+        "file_path": getattr(c, "RECEIPT_FILE_PATH", "LPT1"),
+        "text_encoding": getattr(c, "RECEIPT_TEXT_ENCODING", "wpc1251"),
         "escpos_table": getattr(c, "RECEIPT_ESCPOS_TABLE_BYTE", None),
         "esc_r": getattr(c, "RECEIPT_ESC_R_BYTE", None),
         "escpos_profile": getattr(c, "RECEIPT_ESCPOS_PROFILE", None) or "default",
@@ -63,19 +54,10 @@ def apply(data: dict[str, Any]) -> None:
         except (TypeError, ValueError):
             setattr(c, attr, default)
 
-    if "backend" in data and data["backend"] is not None:
-        c.RECEIPT_PRINTER_BACKEND = str(data["backend"]).strip().lower()
-
-    _s("serial_port", "RECEIPT_SERIAL_PORT")
-    _i("serial_baud", "RECEIPT_SERIAL_BAUDRATE", 9600)
-    _s("network_host", "RECEIPT_NETWORK_HOST")
-    _i("network_port", "RECEIPT_NETWORK_PORT", 9100)
+    c.RECEIPT_PRINTER_BACKEND = "lpt"
     _s("file_path", "RECEIPT_FILE_PATH")
-    _s("win32_name", "RECEIPT_WIN32_NAME")
-    _s("usb_vendor", "RECEIPT_USB_VENDOR")
-    _s("usb_product", "RECEIPT_USB_PRODUCT")
-    _i("usb_in_ep", "RECEIPT_USB_IN_EP", 0x82)
-    _i("usb_out_ep", "RECEIPT_USB_OUT_EP", 1)
+    if not getattr(c, "RECEIPT_FILE_PATH", "").strip():
+        c.RECEIPT_FILE_PATH = "LPT1"
     _s("text_encoding", "RECEIPT_TEXT_ENCODING")
 
     def _opt_int_key(key: str, attr: str) -> None:

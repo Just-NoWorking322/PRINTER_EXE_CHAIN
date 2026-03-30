@@ -7,8 +7,7 @@ Cashino EP-200: в самотесте часто «по умолчанию: CP93
 Опционально: DESKTOP_MARKET_RECEIPT_COERCE_CP866_TABLE=1 — при CP866 принудительно заменить ESC t 46 на 17 (по умолчанию выкл., слот не трогаем).
 
 Требуется: pip install python-escpos
-Для COM (USB-принтер как виртуальный порт): укажите порт COM в конфиге.
-Для Windows RAW по имени принтера: установите pywin32 и используйте backend win32raw.
+Поддерживается только печать чека через LPT (LPT1 / LPT2) с явной установкой кодовой страницы ESC/POS.
 """
 
 from __future__ import annotations
@@ -192,6 +191,13 @@ def _receipt_safe_chars(text: str) -> str:
     return text.replace("\u2116", "N").replace("№", "N")
 
 
+def _receipt_upper(text: str) -> str:
+    """Чек печатаем заглавными буквами для более читаемого вида на 58 мм."""
+    if not text:
+        return text
+    return str(text).upper()
+
+
 def _raw_esc_bold(p: Any, on: bool) -> None:
     p._raw(b"\x1b\x45" + bytes([1 if on else 0]))
 
@@ -201,9 +207,11 @@ def _raw_esc_align(p: Any, mode: int) -> None:
     p._raw(b"\x1b\x61" + bytes([mode & 0xFF]))
 
 
-def _emit_line_encoded(p: Any, codec: str, text: str) -> None:
+def _emit_line_encoded(p: Any, codec: str, text: str, user_enc: str = "") -> None:
     """Строгая таблица ESC/POS: символы вне кодировки заменяются, печать не обрывается."""
-    text = _receipt_safe_chars(str(text))
+    text = _receipt_upper(_receipt_safe_chars(str(text)))
+    if user_enc:
+        _touch_codepage_after_esc_a(p, user_enc)
     try:
         p._raw(text.encode(codec, errors="replace") + b"\n")
     except LookupError:
@@ -235,47 +243,47 @@ def _emit_receipt_rows(
         if kind == "sep":
             _raw_esc_align(p, 0)
             _raw_esc_bold(p, False)
-            _emit_line_encoded(p, codec, _dashed_rule())
+            _emit_line_encoded(p, codec, _dashed_rule(), user_enc)
         elif kind == "sep_solid":
             _raw_esc_align(p, 0)
             _raw_esc_bold(p, False)
-            _emit_line_encoded(p, codec, "-" * RECEIPT_WIDTH)
+            _emit_line_encoded(p, codec, "-" * RECEIPT_WIDTH, user_enc)
         elif kind == "blank":
             p._raw(b"\n")
         elif kind == "center_bold":
             _raw_esc_align(p, 0)
             _raw_esc_bold(p, True)
-            _emit_line_encoded(p, codec, _pad_center(str(row[1])))
+            _emit_line_encoded(p, codec, _pad_center(str(row[1])), user_enc)
             _raw_esc_bold(p, False)
         elif kind == "center":
             _raw_esc_align(p, 0)
             _raw_esc_bold(p, False)
-            _emit_line_encoded(p, codec, _pad_center(str(row[1])))
+            _emit_line_encoded(p, codec, _pad_center(str(row[1])), user_enc)
         elif kind == "left":
             _raw_esc_align(p, 0)
             _raw_esc_bold(p, False)
-            _emit_line_encoded(p, codec, str(row[1]))
+            _emit_line_encoded(p, codec, str(row[1]), user_enc)
         elif kind == "lr":
             # На EP-200 обычный шрифт иногда даёт другую интерпретацию байт; жирный совпадает с «ИТОГ».
             _raw_esc_align(p, 0)
             _raw_esc_bold(p, True)
-            _emit_line_encoded(p, codec, _pad_left_right(str(row[1]), str(row[2])))
+            _emit_line_encoded(p, codec, _pad_left_right(str(row[1]), str(row[2])), user_enc)
             _raw_esc_bold(p, False)
         elif kind == "lr_bold":
             _raw_esc_align(p, 0)
             _raw_esc_bold(p, True)
-            _emit_line_encoded(p, codec, _pad_left_right(str(row[1]), str(row[2])))
+            _emit_line_encoded(p, codec, _pad_left_right(str(row[1]), str(row[2])), user_enc)
             _raw_esc_bold(p, False)
         elif kind == "right":
             _raw_esc_align(p, 2)
             _raw_esc_bold(p, False)
-            _emit_line_encoded(p, codec, str(row[1]))
+            _emit_line_encoded(p, codec, str(row[1]), user_enc)
             _raw_esc_align(p, 0)
             if user_enc:
                 _touch_codepage_after_esc_a(p, user_enc)
         else:
             _raw_esc_align(p, 0)
-            _emit_line_encoded(p, codec, str(row[-1]))
+            _emit_line_encoded(p, codec, str(row[-1]), user_enc)
 
 
 def _plain_lines_to_receipt_rows(lines: list[str]) -> list[ReceiptRow]:
@@ -442,16 +450,16 @@ def _cart_total(cart: dict[str, Any]) -> float:
 
 
 def is_receipt_printing_enabled() -> bool:
-    from config import RECEIPT_PRINTER_BACKEND
+    from config import RECEIPT_FILE_PATH, RECEIPT_PRINTER_BACKEND
 
     b = (RECEIPT_PRINTER_BACKEND or "").strip().lower()
-    return bool(b and b not in ("none", "off", "false", "0"))
+    return b == "lpt" and bool((RECEIPT_FILE_PATH or "").strip())
 
 
 def _open_printer():
-    """Создаёт подключение escpos и вызывает open() где нужно."""
+    """Создаёт LPT-подключение к ESC/POS-принтеру."""
     try:
-        from escpos.printer import File, Network, Serial, Usb
+        from escpos.printer import File
     except ImportError as e:
         raise ReceiptPrinterError(
             "Не установлен пакет python-escpos. Выполните: pip install python-escpos"
@@ -460,16 +468,7 @@ def _open_printer():
     from config import (
         RECEIPT_ESCPOS_PROFILE,
         RECEIPT_FILE_PATH,
-        RECEIPT_NETWORK_HOST,
-        RECEIPT_NETWORK_PORT,
         RECEIPT_PRINTER_BACKEND,
-        RECEIPT_SERIAL_BAUDRATE,
-        RECEIPT_SERIAL_PORT,
-        RECEIPT_USB_IN_EP,
-        RECEIPT_USB_OUT_EP,
-        RECEIPT_USB_PRODUCT,
-        RECEIPT_USB_VENDOR,
-        RECEIPT_WIN32_NAME,
     )
 
     _prof_kw: dict[str, Any] = {}
@@ -478,73 +477,13 @@ def _open_printer():
 
     backend = (RECEIPT_PRINTER_BACKEND or "").strip().lower()
 
-    if backend == "serial":
-        try:
-            import serial  # noqa: F401 — нужен pyserial для escpos.printer.Serial
-        except ImportError as e:
-            raise ReceiptPrinterError(
-                "Для печати через COM-порт установите pyserial: pip install pyserial"
-            ) from e
-        if not RECEIPT_SERIAL_PORT:
-            raise ReceiptPrinterError("Не задан порт (в настройках принтера или DESKTOP_MARKET_RECEIPT_SERIAL, например COM3)")
-        p = Serial(devfile=RECEIPT_SERIAL_PORT, baudrate=RECEIPT_SERIAL_BAUDRATE, **_prof_kw)
-        p.open()
-        return p
-
-    if backend == "network":
-        if not RECEIPT_NETWORK_HOST:
-            raise ReceiptPrinterError("Не задан DESKTOP_MARKET_RECEIPT_HOST")
-        p = Network(host=RECEIPT_NETWORK_HOST, port=RECEIPT_NETWORK_PORT, **_prof_kw)
-        p.open()
-        return p
-
-    if backend == "file":
-        if not RECEIPT_FILE_PATH:
-            raise ReceiptPrinterError("Не задан путь к файлу (настройки принтера)")
-        p = File(devfile=RECEIPT_FILE_PATH, **_prof_kw)
-        p.open()
-        return p
-
     if backend == "lpt":
-        # Параллельный порт Windows: LPT1, LPT2 — тот же драйвер File в escpos
         dev = (RECEIPT_FILE_PATH or "").strip() or "LPT1"
         p = File(devfile=dev, **_prof_kw)
         p.open()
         return p
 
-    if backend == "usb":
-        try:
-            import usb.core  # noqa: F401 — нужен pyusb для escpos.printer.Usb
-        except ImportError as e:
-            raise ReceiptPrinterError(
-                "Для печати по USB установите pyusb: pip install pyusb"
-            ) from e
-        if not RECEIPT_USB_VENDOR or not RECEIPT_USB_PRODUCT:
-            raise ReceiptPrinterError(
-                "Укажите Vendor ID и Product ID в настройках принтера (hex, например 0x0416 и 0x5010)"
-            )
-        p = Usb(
-            idVendor=int(str(RECEIPT_USB_VENDOR).replace("0x", ""), 16),
-            idProduct=int(str(RECEIPT_USB_PRODUCT).replace("0x", ""), 16),
-            in_ep=RECEIPT_USB_IN_EP,
-            out_ep=RECEIPT_USB_OUT_EP,
-            **_prof_kw,
-        )
-        p.open()
-        return p
-
-    if backend == "win32raw":
-        try:
-            from escpos.printer import Win32Raw
-        except ImportError as e:
-            raise ReceiptPrinterError("Для win32raw нужен пакет pywin32 (pip install pywin32)") from e
-        if not Win32Raw.is_usable():
-            raise ReceiptPrinterError("Win32Raw недоступен: установите pywin32")
-        p = Win32Raw(printer_name=RECEIPT_WIN32_NAME or "", **_prof_kw)
-        p.open()
-        return p
-
-    raise ReceiptPrinterError(f"Неизвестный DESKTOP_MARKET_RECEIPT_BACKEND: {backend!r}")
+    raise ReceiptPrinterError("Печать чека поддерживается только через LPT1 / LPT2")
 
 
 def _python_text_codec(user_enc: str) -> str:
@@ -681,8 +620,8 @@ def print_printer_self_check_page() -> None:
     """
     from config import (
         RECEIPT_ESCPOS_PROFILE,
+        RECEIPT_FILE_PATH,
         RECEIPT_PRINTER_BACKEND,
-        RECEIPT_SERIAL_BAUDRATE,
         RECEIPT_TEXT_ENCODING,
     )
 
@@ -690,7 +629,7 @@ def print_printer_self_check_page() -> None:
     ts = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     profile = (RECEIPT_ESCPOS_PROFILE or "универсальный").strip()
     back = (RECEIPT_PRINTER_BACKEND or "none").strip().lower()
-    baud = int(RECEIPT_SERIAL_BAUDRATE or 9600)
+    lpt = (RECEIPT_FILE_PATH or "LPT1").strip() or "LPT1"
     w = 32
     lines: list[str] = [
         "=" * w,
@@ -713,7 +652,7 @@ def print_printer_self_check_page() -> None:
         f"Кодировка текста: {enc}",
         f"Канал: {back}",
         "-" * w,
-        f"COM (если serial): {baud},8,N,1",
+        f"LPT: {str(lpt).strip() or 'LPT1'}",
         "-" * w,
         "Кириллица (тест):",
         "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ",
@@ -743,7 +682,7 @@ def print_printer_test() -> None:
 def print_escpos_text_file(devfile: str, text: str) -> None:
     """
     Печать простого текста на указанный LPT/файл с тем же ESC/POS и кодировкой, что и чек.
-    Нужна, когда основной принтер в режиме serial/network, а тест веса идёт на LPT.
+    Нужна для тестовой печати веса на LPT.
     """
     try:
         from escpos.printer import File

@@ -1,22 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
 
-_spec_dir = os.path.dirname(os.path.abspath(SPEC))
-_cap = os.path.join(_spec_dir, "bundle_escpos", "capabilities.json")
 
 a = Analysis(
-    ["main.py"],
-    pathex=[_spec_dir],
+    ['main.py'],
+    pathex=[],
     binaries=[],
-    datas=[(_cap, "escpos")] if os.path.isfile(_cap) else [],
-    hiddenimports=[
-        "escpos.printer",
-        "escpos.capabilities",
-        "serial",
-        "serial.tools.list_ports",
-        "usb.core",
-        "usb.util",
-    ],
+    datas=[('C:\\Users\\TechLine\\OneDrive\\Рабочий стол\\принтер\\bundle_escpos\\capabilities.json', 'escpos')],
+    hiddenimports=['escpos.printer', 'escpos.capabilities', 'serial', 'serial.tools.list_ports', 'usb.core', 'usb.util'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -32,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="NurMarketKassa",
+    name='NurMarketKassa',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -45,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version='C:\\Users\\TechLine\\AppData\\Local\\Temp\\d1617784-3a56-4c31-879b-ac539ba12483',
 )

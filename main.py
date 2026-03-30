@@ -2319,78 +2319,13 @@ def main(page: ft.Page):
 
     def open_printer_settings_dlg(_):
         cur = printer_config.as_dict()
-
-        def _hex_ui(v: Any) -> str:
-            if isinstance(v, int):
-                return hex(v)
-            s = str(v or "").strip()
-            return s if s else "0x0"
-
-        dd_backend = ft.Dropdown(
-            label="Тип подключения",
+        tf_lpt = ft.TextField(
+            label="LPT-порт чека",
+            value=str(cur.get("file_path") or "LPT1"),
+            hint_text="Обычно LPT1 или LPT2",
+            dense=True,
             width=420,
-            value=str(cur.get("backend") or "none"),
-            options=[
-                ft.dropdown.Option(key="none", text="Нет (печать отключена)"),
-                ft.dropdown.Option(
-                    key="usb",
-                    text="USB (VID / PID) — прямое подключение, часто удобнее COM",
-                ),
-                ft.dropdown.Option(key="serial", text="COM-порт (драйвер USB→Serial)"),
-                ft.dropdown.Option(key="network", text="Сеть (TCP)"),
-                ft.dropdown.Option(key="lpt", text="LPT — параллельный порт (LPT1, LPT2)"),
-                ft.dropdown.Option(key="file", text="Файл на диске (сырой вывод)"),
-                ft.dropdown.Option(key="win32raw", text="Windows: принтер по имени"),
-            ],
         )
-        tf_serial_port = ft.TextField(
-            label="COM-порт",
-            value=str(cur.get("serial_port") or "COM3"),
-            hint_text="Например COM3",
-            dense=True,
-        )
-        tf_serial_baud = ft.TextField(
-            label="Скорость (бод)",
-            value=str(cur.get("serial_baud") or 9600),
-            dense=True,
-        )
-        tf_net_host = ft.TextField(
-            label="IP или хост принтера",
-            value=str(cur.get("network_host") or ""),
-            dense=True,
-        )
-        tf_net_port = ft.TextField(
-            label="Порт TCP",
-            value=str(cur.get("network_port") or 9100),
-            dense=True,
-        )
-        _fp_init = str(cur.get("file_path") or "")
-        if str(cur.get("backend") or "") == "lpt" and not _fp_init.strip():
-            _fp_init = "LPT1"
-        tf_file = ft.TextField(
-            label="Файл или порт LPT",
-            value=_fp_init,
-            hint_text="LPT1 / LPT2 — параллельный порт; или путь к файлу, например C:\\temp\\receipt.prn",
-            dense=True,
-            expand=True,
-        )
-        tf_win32 = ft.TextField(
-            label="Точное имя принтера в Windows",
-            value=str(cur.get("win32_name") or ""),
-            dense=True,
-        )
-        tf_usb_v = ft.TextField(
-            label="USB Vendor ID (hex, без 0x)",
-            value=str(cur.get("usb_vendor") or ""),
-            dense=True,
-        )
-        tf_usb_p = ft.TextField(
-            label="USB Product ID (hex)",
-            value=str(cur.get("usb_product") or ""),
-            dense=True,
-        )
-        tf_usb_in = ft.TextField(label="IN endpoint", value=_hex_ui(cur.get("usb_in_ep")), dense=True)
-        tf_usb_out = ft.TextField(label="OUT endpoint", value=_hex_ui(cur.get("usb_out_ep")), dense=True)
         dd_escpos_profile = ft.Dropdown(
             label="Модель / профиль ESC/POS",
             width=420,
@@ -2406,7 +2341,7 @@ def main(page: ft.Page):
         dd_encoding = ft.Dropdown(
             label="Кодировка текста",
             width=420,
-            value=str(cur.get("text_encoding") or "cp866"),
+            value=str(cur.get("text_encoding") or "wpc1251"),
             options=[
                 ft.dropdown.Option(key="cp866", text="CP866 — кириллица (DOS/OEM)"),
                 ft.dropdown.Option(key="cp1251", text="CP1251 — Windows-1251"),
@@ -2441,31 +2376,13 @@ def main(page: ft.Page):
             width=420,
         )
 
-        def _parse_int(raw: str, default: int) -> int:
-            try:
-                return int(str(raw).strip(), 0)
-            except (TypeError, ValueError):
-                return default
-
         def collect() -> dict[str, Any]:
-            fp = (tf_file.value or "").strip()
-            back = (dd_backend.value or "none").strip().lower()
-            if back == "lpt" and not fp:
-                fp = "LPT1"
-            enc = (dd_encoding.value or "cp866").strip().lower()
+            fp = (tf_lpt.value or "LPT1").strip() or "LPT1"
+            enc = (dd_encoding.value or "wpc1251").strip().lower()
             et = (tf_escpos_table.value or "").strip()
             return {
-                "backend": back,
-                "serial_port": (tf_serial_port.value or "COM3").strip(),
-                "serial_baud": _parse_int(tf_serial_baud.value or "9600", 9600),
-                "network_host": (tf_net_host.value or "").strip(),
-                "network_port": _parse_int(tf_net_port.value or "9100", 9100),
+                "backend": "lpt",
                 "file_path": fp,
-                "win32_name": (tf_win32.value or "").strip(),
-                "usb_vendor": (tf_usb_v.value or "").strip(),
-                "usb_product": (tf_usb_p.value or "").strip(),
-                "usb_in_ep": _parse_int(tf_usb_in.value or "0x82", 0x82),
-                "usb_out_ep": _parse_int(tf_usb_out.value or "0x01", 0x01),
                 "text_encoding": enc,
                 "escpos_profile": (dd_escpos_profile.value or "default").strip(),
                 "escpos_table": et,
@@ -2486,7 +2403,7 @@ def main(page: ft.Page):
             try:
                 printer_config.apply(collect())
                 if not is_receipt_printing_enabled():
-                    snack("Выберите тип подключения не «Нет»", ft.Colors.AMBER_700)
+                    snack("Укажите LPT-порт принтера, например LPT1", ft.Colors.AMBER_700)
                     return
                 print_printer_self_check_page()
                 snack("Страница самопроверки отправлена на принтер", ft.Colors.GREEN_700)
@@ -2521,27 +2438,13 @@ def main(page: ft.Page):
                             color=UI_MUTED,
                         ),
                         ft.Text(
-                            "Если принтер подключён по USB, выберите «USB» и укажите VID/PID "
-                            "из диспетчера устройств (свойства → ИД оборудования, например USB\\VID_0416&PID_5010). "
-                            "Нужен пакет pyusb: pip install pyusb",
+                            "Для чека поддерживается только LPT. По умолчанию используется кириллица WPC1251. "
+                            "Если на вашем принтере текст искажён, попробуйте CP866 и таблицу 17.",
                             size=12,
                             color=UI_MUTED,
                         ),
-                        dd_backend,
-                        ft.Text("USB (прямое подключение)", size=12, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                        tf_usb_v,
-                        tf_usb_p,
-                        ft.Row([tf_usb_in, tf_usb_out], spacing=8),
-                        ft.Text("COM / Serial", size=12, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                        tf_serial_port,
-                        tf_serial_baud,
-                        ft.Text("Сеть", size=12, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                        tf_net_host,
-                        tf_net_port,
-                        ft.Text("Файл или LPT", size=12, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                        tf_file,
-                        ft.Text("Windows", size=12, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                        tf_win32,
+                        ft.Text("LPT", size=12, weight=ft.FontWeight.W_600, color=UI_TEXT),
+                        tf_lpt,
                         dd_escpos_profile,
                         dd_encoding,
                         tf_escpos_table,
