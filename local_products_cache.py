@@ -363,3 +363,50 @@ def clear_all() -> None:
             c.execute("DELETE FROM products")
         finally:
             c.close()
+
+
+def get_recent_products(branch_id: str | None, limit: int = 10) -> list[dict[str, Any]]:
+    """Последние карточки из локального кэша для стартового списка в поиске."""
+    if not _enabled():
+        return []
+    try:
+        lim = max(1, min(int(limit), 50))
+    except (TypeError, ValueError):
+        lim = 10
+    bk = _branch_key(branch_id)
+    with _lock:
+        c = _connect()
+        try:
+            _init_schema(c)
+            rows = c.execute(
+                """
+                SELECT
+                    product_id,
+                    COALESCE(MAX(NULLIF(name, '')), '—') AS name,
+                    MAX(NULLIF(price, '')) AS price,
+                    MAX(NULLIF(unit, '')) AS unit,
+                    MAX(updated_at) AS last_seen
+                FROM products
+                WHERE branch_id = ?
+                GROUP BY product_id
+                ORDER BY last_seen DESC
+                LIMIT ?
+                """,
+                (bk, lim),
+            ).fetchall()
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                pid = row["product_id"]
+                if pid is None or not str(pid).strip():
+                    continue
+                item: dict[str, Any] = {"id": str(pid).strip(), "name": row["name"] or "—"}
+                if row["price"] is not None and str(row["price"]).strip():
+                    item["price"] = str(row["price"]).strip()
+                if row["unit"] is not None and str(row["unit"]).strip():
+                    item["unit"] = str(row["unit"]).strip()
+                out.append(item)
+            return out
+        except sqlite3.Error:
+            return []
+        finally:
+            c.close()

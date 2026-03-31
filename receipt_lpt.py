@@ -11,7 +11,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-RECEIPT_WIDTH = 32
+RECEIPT_WIDTH = 48
 
 LPT_DRIVER_ESCPOS = "escpos"
 LPT_DRIVER_TEXT = "text"
@@ -768,6 +768,8 @@ def print_rows_via_lpt(
         escpos_table_byte=plan.escpos_table,
         esc_r_byte=esc_r_byte,
     )
+    if path.upper().startswith("USB") and (lpt_driver or "").strip().lower() == LPT_DRIVER_TEXT and not blob.endswith(b"\f"):
+        blob = blob + b"\f"
     write_lpt_bytes(path, blob, append_lf_if_missing=False)
     return plan
 
@@ -824,5 +826,8 @@ def print_text_probe_via_lpt(
                 line_ending=line_ending,
             )
         )
-    write_lpt_bytes(path, b"".join(documents), append_lf_if_missing=False)
+    blob = b"".join(documents)
+    if path.upper().startswith("USB") and not blob.endswith(b"\f"):
+        blob = blob + b"\f"
+    write_lpt_bytes(path, blob, append_lf_if_missing=False)
     return plans

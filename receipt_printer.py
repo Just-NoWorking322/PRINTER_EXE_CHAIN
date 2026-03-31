@@ -1,12 +1,12 @@
 """
-Печать чека на Windows: либо через системный GDI-принтер, либо raw-печать на LPT.
+Печать чека на Windows: либо через системный GDI-принтер, либо raw-печать в LPT/USB-принтер.
 
-Для LPT доступны два режима:
+Для raw-печати доступны два режима:
 - ESC/POS raw: печатаем командами ESC/POS, выбираем codepage и при необходимости ESC t вручную.
 - Plain text raw: отправляем только текст в выбранной кодировке, без ESC-команд.
 
 Это позволяет запускать кассу не только с типовыми 58 мм ESC/POS-принтерами,
-но и с более капризными LPT-устройствами, которым нужен чистый текст и CRLF.
+но и с USB-моделями 80 мм, которым нужен raw ESC/POS через Windows spooler.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ import logging
 import os
 import re
 from datetime import datetime
+from pathlib import Path
+import time
 from typing import Any
 
 from receipt_lpt import (
@@ -29,6 +31,21 @@ logger = logging.getLogger(__name__)
 
 class ReceiptPrinterError(Exception):
     """Ошибка подключения или печати на принтере."""
+
+
+def _usb_log_path() -> Path:
+    from printer_config import settings_path
+
+    return settings_path().parent / "usb_print.log"
+
+
+def _append_usb_log(message: str) -> None:
+    try:
+        line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {message}\n"
+        with _usb_log_path().open("a", encoding="utf-8", errors="replace") as f:
+            f.write(line)
+    except OSError:
+        pass
 
 
 def _money(v: Any) -> str:
@@ -129,8 +146,8 @@ def _line_amount(it: dict[str, Any]) -> str:
     return "0.00"
 
 
-# Ширина строки для 58 мм (Font A ~32 символа)
-RECEIPT_WIDTH = 32
+# Ширина строки для 80 мм XPrinter (Font A ~48 символов)
+RECEIPT_WIDTH = 48
 
 
 def _dashed_rule(width: int = RECEIPT_WIDTH) -> str:
@@ -198,7 +215,7 @@ def _receipt_safe_chars(text: str) -> str:
 
 
 def _receipt_upper(text: str) -> str:
-    """Чек печатаем заглавными буквами для более читаемого вида на 58 мм."""
+    """Чек печатаем заглавными буквами для более читаемого вида на термоленте."""
     if not text:
         return text
     return str(text).upper()
@@ -461,11 +478,15 @@ def is_receipt_printing_enabled() -> bool:
         RECEIPT_GDI_PRINTER_NAME,
         RECEIPT_PRINT_MODE,
         RECEIPT_PRINTER_BACKEND,
+        RECEIPT_USB_PORT_NAME,
+        RECEIPT_USB_PRINTER_NAME,
     )
 
     if (RECEIPT_PRINT_MODE or "lpt").strip().lower() == "gdi":
         return bool((RECEIPT_GDI_PRINTER_NAME or "").strip())
     b = (RECEIPT_PRINTER_BACKEND or "").strip().lower()
+    if b == "usb":
+        return bool((RECEIPT_USB_PRINTER_NAME or RECEIPT_USB_PORT_NAME or RECEIPT_FILE_PATH or "").strip())
     return b == "lpt" and bool((RECEIPT_FILE_PATH or "").strip())
 
 
@@ -483,13 +504,36 @@ def _current_lpt_settings() -> dict[str, Any]:
         RECEIPT_FILE_PATH,
         RECEIPT_LPT_DRIVER,
         RECEIPT_LPT_LINE_ENDING,
+        RECEIPT_PRINTER_BACKEND,
         RECEIPT_TEXT_ENCODING,
+        RECEIPT_USB_DEVICE_ID,
+        RECEIPT_USB_FRIENDLY_NAME,
+        RECEIPT_USB_PORT_NAME,
+        RECEIPT_USB_PRINTER_NAME,
+        RECEIPT_USB_PRODUCT_ID,
+        RECEIPT_USB_VENDOR_ID,
     )
 
     return {
-        "devfile": (RECEIPT_FILE_PATH or "LPT1").strip() or "LPT1",
-        "lpt_driver": (RECEIPT_LPT_DRIVER or "escpos").strip().lower(),
-        "line_ending": (RECEIPT_LPT_LINE_ENDING or "lf").strip().lower(),
+        "backend": (RECEIPT_PRINTER_BACKEND or "lpt").strip().lower() or "lpt",
+        "devfile": (
+            (
+                RECEIPT_USB_PRINTER_NAME
+                or RECEIPT_USB_PORT_NAME
+                or RECEIPT_FILE_PATH
+            )
+            if (RECEIPT_PRINTER_BACKEND or "").strip().lower() == "usb"
+            else RECEIPT_FILE_PATH
+        ).strip()
+        or ("USB001" if (RECEIPT_PRINTER_BACKEND or "").strip().lower() == "usb" else "LPT1"),
+        "usb_device_id": (RECEIPT_USB_DEVICE_ID or "").strip(),
+        "usb_printer_name": (RECEIPT_USB_PRINTER_NAME or "").strip(),
+        "usb_friendly_name": (RECEIPT_USB_FRIENDLY_NAME or "").strip(),
+        "usb_port_name": (RECEIPT_USB_PORT_NAME or "").strip(),
+        "usb_vendor_id": (RECEIPT_USB_VENDOR_ID or "").strip(),
+        "usb_product_id": (RECEIPT_USB_PRODUCT_ID or "").strip(),
+        "lpt_driver": (RECEIPT_LPT_DRIVER or "text").strip().lower(),
+        "line_ending": (RECEIPT_LPT_LINE_ENDING or "crlf").strip().lower(),
         "text_encoding": (RECEIPT_TEXT_ENCODING or "cp866").strip().lower(),
         "escpos_profile": (RECEIPT_ESCPOS_PROFILE or "default").strip() or "default",
         "escpos_table_byte": RECEIPT_ESCPOS_TABLE_BYTE,
@@ -508,7 +552,7 @@ def _print_rows_via_gdi(rows: list[ReceiptRow]) -> None:
 
 
 def _open_printer():
-    """Создаёт LPT-подключение к ESC/POS-принтеру."""
+    """Создаёт raw-подключение к ESC/POS-принтеру."""
     try:
         from escpos.printer import File  # noqa: F401 — проверка установки escpos
     except ImportError as e:
@@ -520,6 +564,8 @@ def _open_printer():
         RECEIPT_ESCPOS_PROFILE,
         RECEIPT_FILE_PATH,
         RECEIPT_PRINTER_BACKEND,
+        RECEIPT_USB_PORT_NAME,
+        RECEIPT_USB_PRINTER_NAME,
     )
 
     _prof_kw: dict[str, Any] = {}
@@ -528,19 +574,27 @@ def _open_printer():
 
     backend = (RECEIPT_PRINTER_BACKEND or "").strip().lower()
 
-    if backend == "lpt":
-        dev = (RECEIPT_FILE_PATH or "").strip() or "LPT1"
+    if backend in ("lpt", "usb"):
+        dev = (
+            ((RECEIPT_USB_PRINTER_NAME or "").strip() or (RECEIPT_USB_PORT_NAME or "").strip())
+            if backend == "usb"
+            else (RECEIPT_FILE_PATH or "").strip()
+        ) or ("USB001" if backend == "usb" else "LPT1")
         try:
             from lpt_windows import open_escpos_lpt
 
             return open_escpos_lpt(dev, **_prof_kw)
         except OSError as e:
+            target_hint = (
+                "Проверьте USB-порт/очередь принтера в Windows и что устройство принимает RAW."
+                if backend == "usb"
+                else "Проверьте в Windows: принтер на порту LPT1/LPT2."
+            )
             raise ReceiptPrinterError(
-                f"Не удалось открыть LPT «{dev}»: {e}. "
-                "Проверьте в Windows: принтер на порту LPT1/LPT2; для USB без LPT — режим GDI."
+                f"Не удалось открыть RAW-канал «{dev}»: {e}. {target_hint}"
             ) from e
 
-    raise ReceiptPrinterError("Печать чека поддерживается только через LPT1 / LPT2")
+    raise ReceiptPrinterError("Печать чека поддерживается только через RAW LPT/USB или Windows/GDI")
 
 
 def _python_text_codec(user_enc: str) -> str:
@@ -670,6 +724,60 @@ def print_printer_quick_test() -> None:
     print_receipt_text("Тест печати\nDesktop Market POS\n— OK —")
 
 
+def print_printer_usb_test() -> None:
+    """Совместимый USB-тест: отправляет несколько простых вариантов в USB001/USBPRINT и пишет лог."""
+    from lpt_windows import write_lpt_bytes
+
+    cfg = _current_lpt_settings()
+    path = (
+        cfg.get("usb_port_name")
+        or cfg.get("usb_printer_name")
+        or cfg.get("devfile")
+        or "USB001"
+    )
+    backend = str(cfg.get("backend") or "").strip().lower()
+    if backend != "usb":
+        print_printer_quick_test()
+        return
+
+    lines = [
+        "USB TEST",
+        str(cfg.get("usb_friendly_name") or "THERMAL PRINTER"),
+        str(path),
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "OK",
+    ]
+
+    variants: list[tuple[str, bytes]] = [
+        ("LF", ("\n".join(lines) + "\n\n\n").encode("ascii", errors="replace")),
+        ("CRLF", ("\r\n".join(lines) + "\r\n\r\n\r\n").encode("ascii", errors="replace")),
+        ("CRLF+FF", ("\r\n".join(lines) + "\r\n\r\n\r\n\f").encode("ascii", errors="replace")),
+        ("CRLF+FF+SUB", ("\r\n".join(lines) + "\r\n\r\n\r\n\f\x1a").encode("ascii", errors="replace")),
+    ]
+
+    _append_usb_log(
+        "USB test start "
+        f"path={path} backend={backend} driver={cfg.get('lpt_driver')} "
+        f"line_ending={cfg.get('line_ending')} device={cfg.get('usb_friendly_name') or '—'}"
+    )
+    errors: list[str] = []
+    for label, payload in variants:
+        preview = " ".join(f"{b:02X}" for b in payload[:24])
+        try:
+            _append_usb_log(f"send variant={label} bytes={len(payload)} preview={preview}")
+            write_lpt_bytes(str(path), payload, append_lf_if_missing=False)
+            _append_usb_log(f"send ok variant={label}")
+            time.sleep(0.25)
+        except OSError as ex:
+            errors.append(f"{label}: {ex}")
+            _append_usb_log(f"send fail variant={label} error={ex}")
+
+    if len(errors) == len(variants):
+        raise ReceiptPrinterError(
+            f"Не удалось отправить USB-тест на «{path}»: {'; '.join(errors)}"
+        )
+
+
 def print_printer_self_check_page() -> None:
     """
     Тестовая страница в духе встроенного отчёта EP-200: пояснение про CP936 GBK
@@ -696,6 +804,9 @@ def print_printer_self_check_page() -> None:
     line_ending = (RECEIPT_LPT_LINE_ENDING or "lf").strip().lower()
     mode = (RECEIPT_PRINT_MODE or "lpt").strip().lower()
     gdi_name = (RECEIPT_GDI_PRINTER_NAME or "").strip()
+    if mode != "gdi" and back == "usb" and lpt_driver == "text" and str(lpt).strip().upper().startswith("USB"):
+        print_printer_usb_test()
+        return
     cp_plan = describe_codepage_plan(
         text_encoding=enc,
         escpos_profile=RECEIPT_ESCPOS_PROFILE,
@@ -732,7 +843,7 @@ def print_printer_self_check_page() -> None:
             return
         except Exception as ex:
             logger.warning("probe print failed, fallback to standard self-check: %s", ex)
-    w = 32
+    w = RECEIPT_WIDTH
     lines: list[str] = [
         "=" * w,
         "  САМОПРОВЕРКА (ПРИЛОЖЕНИЕ)",
@@ -740,26 +851,26 @@ def print_printer_self_check_page() -> None:
         "=" * w,
         f"Дата/время: {ts}",
         "-" * w,
-        "Модель (цель): Cashino EP-200",
-        "Версия прошивки: см. отчёт",
-        "  принтера (у держ. кнопки)",
+        "Модель (цель): XPrinter 80mm USB",
+        "Версия прошивки: см. селф-тест",
+        "принтера",
         "-" * w,
-        "В отчёте принтера часто:",
-        "Код.стр. по умол.: CP936 GBK",
-        "Это нормально. Печать из",
-        "кассы: ESC % 0 + ESC t 46 +",
-        "WPC1251 (байты cp1251).",
+        "Стартовый пресет для этой модели:",
+        "Кодировка текста: CP866",
+        "Таблица ESC/POS: ESC t 17",
+        "Режим USB: RAW / USB Printing",
+        "При кракозябрах проверьте порт",
         "-" * w,
-        f"Профиль в приложении: {profile[:28]}",
-        f"LPT драйвер: {lpt_driver}",
+        f"Профиль в приложении: {profile[:44]}",
+        f"RAW драйвер: {lpt_driver}",
         f"Конец строки: {line_ending}",
         f"Кодировка текста: {enc}",
-        f"План таблицы: {cp_plan[:28]}",
+        f"План таблицы: {cp_plan[:44]}",
         f"Режим: {mode}",
         "-" * w,
-        (f"GDI: {gdi_name[:24]}" if mode == "gdi" else f"LPT: {str(lpt).strip() or 'LPT1'}"),
+        (f"GDI: {gdi_name[:40]}" if mode == "gdi" else f"RAW: {str(lpt).strip() or ('XPrinter N160II' if back == 'usb' else 'LPT1')}"),
         "-" * w,
-        (f"Канал ESC/POS: {back}" if mode != "gdi" else "Канал ESC/POS: —"),
+        (f"Канал ESC/POS: {back or 'lpt'}" if mode != "gdi" else "Канал ESC/POS: —"),
         "-" * w,
         "Кириллица (тест):",
         "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ",
@@ -788,7 +899,7 @@ def print_printer_test() -> None:
 
 def print_escpos_text_file(devfile: str, text: str) -> None:
     """
-    Печать простого текста на указанный LPT/файл с тем же ESC/POS и кодировкой, что и чек.
+    Печать простого текста на указанный raw-канал/файл с тем же ESC/POS и кодировкой, что и чек.
     Нужна для тестовой печати веса на LPT.
     """
     raw = (text or "").strip()
@@ -797,7 +908,7 @@ def print_escpos_text_file(devfile: str, text: str) -> None:
 
     path = (devfile or "").strip()
     if not path:
-        raise ReceiptPrinterError("Не указан путь (LPT1 или файл)")
+        raise ReceiptPrinterError("Не указан путь или имя принтера (например LPT1 или XPrinter)")
     lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     rows = _plain_lines_to_receipt_rows(lines)
     cfg = _current_lpt_settings()
@@ -815,7 +926,7 @@ def print_escpos_text_file(devfile: str, text: str) -> None:
     except (OSError, ValueError) as e:
         raise ReceiptPrinterError(
             f"Не удалось отправить печать на «{path}»: {e}. "
-            "Проверьте LPT-порт, драйвер LPT и кодировку."
+            "Проверьте имя USB-принтера/порт, RAW-драйвер и кодировку."
         ) from e
 
 

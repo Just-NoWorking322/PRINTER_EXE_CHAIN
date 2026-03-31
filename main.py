@@ -41,17 +41,11 @@ import app_database
 import local_products_cache
 import config
 import printer_config
-from receipt_lpt import (
-    get_codepage_options,
-    get_lpt_driver_options,
-    get_lpt_line_ending_options,
-    get_profile_options,
-)
 from receipt_printer import (
     ReceiptPrinterError,
     is_receipt_printing_enabled,
     print_escpos_text_file,
-    print_printer_self_check_page,
+    print_printer_usb_test,
     print_receipt_text,
     print_sale_receipt,
 )
@@ -527,6 +521,19 @@ UI_WARN_BG = "#fffbeb"
 UI_WARN_BORDER = "#f59e0b"
 UI_WARN_TEXT = "#b45309"
 
+MINI_KEYBOARD_ALPHA_ROWS = (
+    ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+    ("ё", "й", "ц", "у", "к", "е", "н", "г", "ш", "щ", "з", "х", "ъ"),
+    ("ф", "ы", "в", "а", "п", "р", "о", "л", "д", "ж", "э"),
+    ("я", "ч", "с", "м", "и", "т", "ь", "б", "ю", "-", "."),
+)
+MINI_KEYBOARD_NUMERIC_ROWS = (
+    ("1", "2", "3"),
+    ("4", "5", "6"),
+    ("7", "8", "9"),
+    (".", "0", "-"),
+)
+
 
 def _section_heading(title: str, subtitle: str | None = None) -> ft.Column:
     """Заголовок блока с акцентной полосой."""
@@ -718,6 +725,7 @@ def main(page: ft.Page):
         "barcode_buf": "",
         "barcode_last_ms": 0.0,
         "search_gen": 0,
+        "last_search_query": "",
     }
 
     error_text = ft.Ref[ft.Text]()
@@ -729,6 +737,7 @@ def main(page: ft.Page):
     total_txt = ft.Ref[ft.Text]()
     search_field_ref = ft.Ref[ft.TextField]()
     search_results_ref = ft.Ref[ft.Column]()
+    keyboard_overlay_ref = ft.Ref[ft.Container]()
     # Подсказки/ошибки на экране кассы (поле error_text есть только на логине — их не было видно).
     cashier_hint_ref = ft.Ref[ft.Text]()
     status_chip = ft.Ref[ft.Text]()
@@ -737,24 +746,42 @@ def main(page: ft.Page):
     weight_scale_text = ft.Ref[ft.Text]()
     weight_scale_status = ft.Ref[ft.Text]()
     scale_state: dict[str, Any] = {"mgr": None}
+    keyboard_state: dict[str, Any] = {
+        "visible": False,
+        "field": None,
+        "layout": "alpha",
+        "title": "Клавиатура",
+        "left": 0.0,
+        "top": 0.0,
+        "submit": None,
+        "on_change": None,
+    }
     # Весы: по умолчанию включены; отключить: DESKTOP_MARKET_SCALE_ENABLED=0
     _scale_env = os.environ.get("DESKTOP_MARKET_SCALE_ENABLED", "1").strip().lower()
     scale_feature_enabled = _scale_env not in ("0", "false", "no", "off")
 
     def set_loading(visible: bool):
-        if loading_overlay.current:
+        if loading_overlay.current and loading_overlay.current.visible != visible:
             loading_overlay.current.visible = visible
             page.update()
 
     def show_error(msg: str):
+        changed = False
         if error_text.current:
-            error_text.current.value = msg
-            error_text.current.visible = bool(msg)
+            visible = bool(msg)
+            if error_text.current.value != msg or error_text.current.visible != visible:
+                error_text.current.value = msg
+                error_text.current.visible = visible
+                changed = True
         if cashier_hint_ref.current:
             s = (msg or "").strip()
-            cashier_hint_ref.current.value = msg or ""
-            cashier_hint_ref.current.visible = bool(s)
-        page.update()
+            visible = bool(s)
+            if cashier_hint_ref.current.value != (msg or "") or cashier_hint_ref.current.visible != visible:
+                cashier_hint_ref.current.value = msg or ""
+                cashier_hint_ref.current.visible = visible
+                changed = True
+        if changed:
+            page.update()
 
     def snack(msg: str, color: str | None = None):
         page.snack_bar = ft.SnackBar(ft.Text(msg), bgcolor=color)
@@ -771,6 +798,241 @@ def main(page: ft.Page):
             )
 
     page.window.on_event = on_window_event
+
+    def _resolve_keyboard_field():
+        field = keyboard_state.get("field")
+        if field is None:
+            return None
+        try:
+            _ = field.value
+            return field
+        except Exception:
+            return None
+
+    def _keyboard_apply_position() -> None:
+        overlay = keyboard_overlay_ref.current
+        if not overlay:
+            return
+        kb_w = 568.0 if (keyboard_state.get("layout") or "alpha") == "alpha" else 248.0
+        kb_h = 262.0 if (keyboard_state.get("layout") or "alpha") == "alpha" else 246.0
+        max_w = max(int(kb_w) + 16, int(page.width or page.window.width or 1280))
+        max_h = max(int(kb_h) + 80, int(page.height or page.window.height or 840))
+        keyboard_state["left"] = max(8.0, min(float(keyboard_state.get("left") or 0.0), max_w - kb_w - 8.0))
+        keyboard_state["top"] = max(60.0, min(float(keyboard_state.get("top") or 0.0), max_h - kb_h - 8.0))
+        overlay.left = keyboard_state["left"]
+        overlay.top = keyboard_state["top"]
+
+    def _keyboard_anchor_bottom_center() -> None:
+        kb_w = 568.0 if (keyboard_state.get("layout") or "alpha") == "alpha" else 248.0
+        kb_h = 262.0 if (keyboard_state.get("layout") or "alpha") == "alpha" else 246.0
+        max_w = max(int(kb_w) + 16, int(page.width or page.window.width or 1280))
+        max_h = max(int(kb_h) + 80, int(page.height or page.window.height or 840))
+        keyboard_state["left"] = 12.0
+        keyboard_state["top"] = max(60.0, max_h - kb_h - 14.0)
+
+    def _hide_keyboard(update_page: bool = True) -> None:
+        keyboard_state["visible"] = False
+        keyboard_state["field"] = None
+        keyboard_state["submit"] = None
+        keyboard_state["on_change"] = None
+        overlay = keyboard_overlay_ref.current
+        if overlay:
+            overlay.visible = False
+            if update_page:
+                page.update()
+
+    def _show_keyboard_for(
+        field: Any,
+        *,
+        title: str,
+        layout: str = "alpha",
+        submit: Any = None,
+        on_change: Any = None,
+    ) -> None:
+        same_field = keyboard_state.get("field") is field
+        same_layout = keyboard_state.get("layout") == ("numeric" if layout == "numeric" else "alpha")
+        same_title = keyboard_state.get("title") == title
+        keyboard_state["visible"] = True
+        keyboard_state["field"] = field
+        keyboard_state["layout"] = "numeric" if layout == "numeric" else "alpha"
+        keyboard_state["title"] = title
+        keyboard_state["submit"] = submit
+        keyboard_state["on_change"] = on_change
+        overlay = keyboard_overlay_ref.current
+        if overlay:
+            if not (overlay.visible and same_field and same_layout and same_title):
+                _keyboard_anchor_bottom_center()
+                overlay.content = build_keyboard_overlay_content()
+            overlay.visible = True
+            _keyboard_apply_position()
+            page.update()
+
+    def _notify_keyboard_change() -> None:
+        cb = keyboard_state.get("on_change")
+        if callable(cb):
+            try:
+                cb(None)
+            except TypeError:
+                cb()
+
+    def _apply_keyboard_text(value: str) -> None:
+        field = _resolve_keyboard_field()
+        if not field:
+            _hide_keyboard()
+            return
+        cur = str(field.value or "")
+        if cur == value:
+            return
+        field.value = value
+        try:
+            field.update()
+        except Exception:
+            page.update()
+        _notify_keyboard_change()
+
+    def _keyboard_press(token: str) -> None:
+        field = _resolve_keyboard_field()
+        if not field:
+            _hide_keyboard()
+            return
+        cur = str(field.value or "")
+        if token == "BACK":
+            _apply_keyboard_text(cur[:-1])
+            return
+        if token == "SPACE":
+            _apply_keyboard_text(cur + " ")
+            return
+        if token == "CLR":
+            _apply_keyboard_text("")
+            return
+        if token == "ENTER":
+            submit = keyboard_state.get("submit")
+            if callable(submit):
+                try:
+                    submit(None)
+                except TypeError:
+                    submit()
+            return
+        if token == "CLOSE":
+            _hide_keyboard()
+            return
+        _apply_keyboard_text(cur + token)
+
+    def _keyboard_button(
+        caption: str,
+        token: str,
+        *,
+        expand: bool = False,
+        width: int | None = None,
+        accent: bool = False,
+    ) -> ft.Control:
+        return ft.FilledButton(
+            caption,
+            on_click=lambda _e, t=token: _keyboard_press(t),
+            height=34,
+            width=width,
+            expand=expand,
+            style=ft.ButtonStyle(
+                bgcolor=UI_ACCENT if accent else UI_SURFACE,
+                color=UI_TEXT_ON_YELLOW if accent else UI_TEXT,
+                shape=ft.RoundedRectangleBorder(radius=8),
+                side=ft.BorderSide(1, UI_BORDER if not accent else UI_ACCENT_DIM),
+                padding=ft.Padding.symmetric(horizontal=8, vertical=0),
+            ),
+        )
+
+    def build_keyboard_overlay_content() -> ft.Control:
+        layout = keyboard_state.get("layout") or "alpha"
+        rows = MINI_KEYBOARD_NUMERIC_ROWS if layout == "numeric" else MINI_KEYBOARD_ALPHA_ROWS
+        key_width = 39 if layout == "alpha" else 72
+        key_rows: list[ft.Control] = []
+        for row in rows:
+            key_rows.append(
+                ft.Row(
+                    [_keyboard_button(label, label, width=key_width) for label in row],
+                    spacing=4,
+                    tight=True,
+                )
+            )
+        action_row = (
+            ft.Row(
+                [
+                    _keyboard_button("⌫", "BACK", width=54),
+                    _keyboard_button("Очистить", "CLR", expand=True),
+                    _keyboard_button("Закрыть", "CLOSE", width=72),
+                ],
+                spacing=4,
+            )
+            if layout == "numeric"
+            else ft.Row(
+                [
+                    _keyboard_button("Пробел", "SPACE", expand=True),
+                    _keyboard_button("⌫", "BACK", width=54),
+                    _keyboard_button("Очистить", "CLR", width=84),
+                    _keyboard_button("Закрыть", "CLOSE", width=72),
+                ],
+                spacing=4,
+            )
+        )
+        submit_row = ft.Row(
+            [
+                _keyboard_button(
+                    "Готово" if layout == "numeric" else "Найти",
+                    "ENTER",
+                    expand=True,
+                    accent=True,
+                )
+            ]
+        )
+        return ft.Container(
+            width=568 if layout == "alpha" else 248,
+            padding=8,
+            bgcolor=UI_SURFACE,
+            border=ft.Border.all(1, UI_BORDER),
+            border_radius=12,
+            shadow=ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=18,
+                color=ft.Colors.with_opacity(0.16, "#111827"),
+                offset=ft.Offset(0, 6),
+            ),
+            content=ft.Column(
+                [
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=8, vertical=6),
+                        border_radius=10,
+                        bgcolor=UI_SURFACE_ELEV,
+                        content=ft.Row(
+                            [
+                                ft.Icon(ft.Icons.KEYBOARD_OUTLINED, size=16, color=UI_MUTED),
+                                ft.Text(
+                                    str(keyboard_state.get("title") or "Клавиатура"),
+                                    size=12,
+                                    color=UI_TEXT,
+                                    weight=ft.FontWeight.W_600,
+                                    expand=True,
+                                ),
+                            ],
+                            spacing=6,
+                        ),
+                    ),
+                    *key_rows,
+                    action_row,
+                    submit_row,
+                ],
+                tight=True,
+                spacing=4,
+            ),
+        )
+
+    def build_keyboard_overlay() -> ft.Container:
+        return ft.Container(
+            ref=keyboard_overlay_ref,
+            visible=False,
+            left=keyboard_state["left"],
+            top=keyboard_state["top"],
+            content=build_keyboard_overlay_content(),
+        )
 
     def _cart_from_patch_response(data: Any) -> dict[str, Any] | None:
         """Если PATCH вернул полную корзину — второй GET не нужен."""
@@ -994,6 +1256,12 @@ def main(page: ft.Page):
             value=str(item.get("quantity", "1")),
             dense=True,
             width=280,
+            on_focus=lambda _e: _show_keyboard_for(
+                tf_qty,
+                title="Количество",
+                layout="numeric",
+                submit=_save,
+            ),
             on_submit=_save,
         )
         tf_price = ft.TextField(
@@ -1001,6 +1269,12 @@ def main(page: ft.Page):
             value=_money(item.get("unit_price")),
             dense=True,
             width=280,
+            on_focus=lambda _e: _show_keyboard_for(
+                tf_price,
+                title="Цена",
+                layout="numeric",
+                submit=_save,
+            ),
             on_submit=_save,
         )
         tf_disc = ft.TextField(
@@ -1008,6 +1282,12 @@ def main(page: ft.Page):
             value=_money(dval) if dval not in (None, "") else "0.00",
             dense=True,
             width=280,
+            on_focus=lambda _e: _show_keyboard_for(
+                tf_disc,
+                title="Скидка",
+                layout="numeric",
+                submit=_save,
+            ),
             on_submit=_save,
         )
 
@@ -1382,10 +1662,22 @@ def main(page: ft.Page):
         session["barcode_buf"] = nb
         session["barcode_last_ms"] = now_ms
 
-    def clear_search_results():
+    def _recent_products(limit: int = 10) -> list[dict[str, Any]]:
+        try:
+            return local_products_cache.get_recent_products(client.active_branch_id, limit=limit)
+        except Exception:
+            return []
+
+    def clear_search_results(show_recent: bool = False):
         col = search_results_ref.current
         if col:
             col.controls.clear()
+        if show_recent:
+            _fill_search_results(
+                _recent_products(10),
+                empty_label="Последние товары пока не накопились",
+                header="Последние товары",
+            )
 
     def add_product_by_id(product_id: str, quantity: str | None = None):
         err = validate_product_id(product_id)
@@ -1415,7 +1707,8 @@ def main(page: ft.Page):
                     pass
                 if search_field_ref.current:
                     search_field_ref.current.value = ""
-                clear_search_results()
+                session["last_search_query"] = ""
+                clear_search_results(show_recent=True)
                 show_error("")
             except ApiError as ex:
                 snack(str(ex), ft.Colors.RED_700)
@@ -1471,7 +1764,7 @@ def main(page: ft.Page):
             page.update()
 
         tf_q = ft.TextField(
-            label="Вес, кг",
+            label="Вес",
             value=initial,
             hint_text="Введите вручную или «С весов»",
             dense=True,
@@ -1526,13 +1819,30 @@ def main(page: ft.Page):
         else:
             add_product_by_id(str(p.get("id")))
 
-    def _fill_search_results(products: list):
+    def _fill_search_results(
+        products: list,
+        *,
+        empty_label: str = "Ничего не найдено",
+        header: str = "",
+    ):
         col = search_results_ref.current
         if not col:
             return
         col.controls.clear()
+        if header:
+            col.controls.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                    content=ft.Text(
+                        header,
+                        size=12,
+                        color=UI_MUTED,
+                        weight=ft.FontWeight.W_600,
+                    ),
+                )
+            )
         if not products:
-            col.controls.append(ft.Text("Ничего не найдено", color=UI_MUTED, size=13))
+            col.controls.append(ft.Text(empty_label, color=UI_MUTED, size=13))
             return
         for p in products:
             if not isinstance(p, dict):
@@ -1572,16 +1882,28 @@ def main(page: ft.Page):
                 )
             )
 
+    def _show_recent_products() -> None:
+        _fill_search_results(
+            _recent_products(10),
+            empty_label="Последние товары пока не накопились",
+            header="Последние товары",
+        )
+
     def _do_search(q: str, silent: bool = False):
         q = (q or "").strip()
         if not silent:
             show_error("")
+        if not q:
+            session["last_search_query"] = ""
+            clear_search_results(show_recent=True)
+            show_error("")
+            page.update()
+            return
         if len(q) < 2:
-            clear_search_results()
+            clear_search_results(show_recent=True)
             if not silent:
                 show_error("Введите минимум 2 символа для поиска по названию")
             else:
-                # Живой поиск: не дёргаем подсказку на каждый символ
                 show_error("")
             page.update()
             return
@@ -1601,9 +1923,12 @@ def main(page: ft.Page):
                 snack("Сначала начните продажу", ft.Colors.AMBER_700)
             page.update()
             return
+        if q == str(session.get("last_search_query") or "") and search_results_ref.current:
+            return
 
         async def _search_task():
-            set_loading(True)
+            if not silent:
+                set_loading(True)
             try:
                 show_error("")
                 products = await asyncio.to_thread(client.products_search, q)
@@ -1613,13 +1938,16 @@ def main(page: ft.Page):
                     )
                 except Exception:
                     pass
+                session["last_search_query"] = q
                 _fill_search_results(products)
                 page.update()
             except ApiError as ex:
                 show_error(str(ex))
-                snack(str(ex), ft.Colors.RED_700)
+                if not silent:
+                    snack(str(ex), ft.Colors.RED_700)
             finally:
-                set_loading(False)
+                if not silent:
+                    set_loading(False)
 
         page.run_task(_search_task)
 
@@ -1634,6 +1962,12 @@ def main(page: ft.Page):
 
     def on_search_change(_):
         q = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+        if not q:
+            session["last_search_query"] = ""
+            clear_search_results(show_recent=True)
+            show_error("")
+            page.update()
+            return
         if _looks_like_barcode_query(q):
             return
         session["search_gen"] = session.get("search_gen", 0) + 1
@@ -2279,10 +2613,13 @@ def main(page: ft.Page):
         session["cashier_active"] = True
         session["barcode_buf"] = ""
         session["barcode_last_ms"] = 0.0
+        session["last_search_query"] = ""
         page.on_keyboard_event = on_global_keyboard
         page.controls.clear()
         page.add(build_cashier())
         page.window.prevent_close = True
+        page.update()
+        _show_recent_products()
         page.update()
         if scale_feature_enabled:
             old = scale_state.get("mgr")
@@ -2326,25 +2663,24 @@ def main(page: ft.Page):
     def open_printer_settings_dlg(_):
         cur = printer_config.as_dict()
 
-        def _list_windows_printers() -> list[str]:
+        def _list_usb_devices() -> list[dict[str, Any]]:
             try:
-                import win32print
+                from usb_printers import list_usb_printers
 
-                flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
-                rows = win32print.EnumPrinters(flags, None, 4)
-                names: list[str] = []
-                for row in rows:
-                    if isinstance(row, tuple) and len(row) >= 3:
-                        name = str(row[2] or "").strip()
-                        if name:
-                            names.append(name)
-                return sorted(set(names), key=lambda x: x.lower())
+                rows = list_usb_printers()
+                return [row for row in rows if isinstance(row, dict)]
             except Exception:
                 return []
 
-        def _dropdown_options_with_current(
+        _usb_devices: list[dict[str, Any]] = _list_usb_devices()
+        _usb_lookup: dict[str, dict[str, Any]] = {
+            str(item.get("device_key") or "").strip(): item
+            for item in _usb_devices
+            if str(item.get("device_key") or "").strip()
+        }
+        def _dropdown_options(
             pairs: list[tuple[str, str]],
-            current: str,
+            current: str = "",
         ) -> list[ft.dropdown.Option]:
             opts = [ft.dropdown.Option(key=key, text=label) for key, label in pairs]
             cur_key = (current or "").strip()
@@ -2352,129 +2688,177 @@ def main(page: ft.Page):
                 opts.insert(0, ft.dropdown.Option(key=cur_key, text=f"{cur_key} (текущее значение)"))
             return opts
 
-        tf_mode = ft.Dropdown(
-            label="Способ печати чека",
-            width=420,
-            value=str(cur.get("receipt_print_mode") or "lpt"),
-            options=[
-                ft.dropdown.Option(key="lpt", text="LPT / ESC-POS"),
-                ft.dropdown.Option(key="gdi", text="Windows / GDI"),
-            ],
-        )
-        _gdi_initial = str(cur.get("gdi_printer_name") or "RONGTA 58mm Series Printer")
-        _gdi_names = _list_windows_printers()
-        _gdi_options = [ft.dropdown.Option(key=name, text=name) for name in _gdi_names]
-        if _gdi_initial and _gdi_initial not in _gdi_names:
-            _gdi_options.insert(0, ft.dropdown.Option(key=_gdi_initial, text=f"{_gdi_initial} (текущий)"))
-        dd_gdi = ft.Dropdown(
-            label="Выбрать установленный Windows-принтер",
-            width=420,
-            value=_gdi_initial if _gdi_options else None,
-            options=_gdi_options,
-        )
-        tf_gdi = ft.TextField(
-            label="Windows/GDI: имя принтера",
-            value=_gdi_initial,
-            hint_text="Точное имя из «Устройства и принтеры»",
-            dense=True,
-            width=420,
-        )
-        if dd_gdi.options:
-            def _use_selected_gdi(_e=None):
-                tf_gdi.value = (dd_gdi.value or "").strip()
-                page.update()
+        def _usb_option_pairs() -> list[tuple[str, str]]:
+            return [
+                (
+                    str(item.get("device_key") or "").strip(),
+                    str(item.get("display_name") or item.get("friendly_name") or "USB printer").strip(),
+                )
+                for item in _usb_devices
+                if str(item.get("device_key") or "").strip()
+            ]
 
-            dd_gdi.on_change = _use_selected_gdi
-        tf_lpt = ft.TextField(
-            label="LPT-порт чека",
-            value=str(cur.get("file_path") or "LPT1"),
-            hint_text="Обычно LPT1 или LPT2",
+        def _is_generic_usb_device(item: dict[str, Any] | None) -> bool:
+            if not item:
+                return False
+            if str(item.get("printer_name") or "").strip():
+                return False
+            port_name = str(item.get("port_name") or "").strip().upper()
+            device_key = str(item.get("device_key") or "").strip().upper()
+            class_name = str(item.get("class_name") or "").strip().lower()
+            friendly_name = str(item.get("friendly_name") or "").strip().lower()
+            return (
+                port_name.startswith("USB")
+                or device_key.startswith("USBPRINT\\")
+                or class_name == "softwaredevice"
+                or "printerpos" in friendly_name
+            )
+
+        def _preferred_usb_key() -> str:
+            for item in _usb_devices:
+                if "printerpos" in str(item.get("friendly_name") or "").strip().lower():
+                    return str(item.get("device_key") or "").strip()
+            for item in _usb_devices:
+                if str(item.get("port_name") or "").strip().upper().startswith("USB"):
+                    return str(item.get("device_key") or "").strip()
+            if _usb_devices:
+                return str(_usb_devices[0].get("device_key") or "").strip()
+            return ""
+
+        def _initial_usb_key() -> str:
+            saved_key = str(cur.get("usb_device_id") or "").strip()
+            if saved_key and saved_key in _usb_lookup:
+                return saved_key
+            saved_values = {
+                str(cur.get("usb_printer_name") or "").strip().lower(),
+                str(cur.get("usb_friendly_name") or "").strip().lower(),
+                str(cur.get("usb_port_name") or "").strip().lower(),
+                str(cur.get("file_path") or "").strip().lower(),
+            }
+            saved_values.discard("")
+            for item in _usb_devices:
+                item_values = {
+                    str(item.get("printer_name") or "").strip().lower(),
+                    str(item.get("friendly_name") or "").strip().lower(),
+                    str(item.get("port_name") or "").strip().lower(),
+                }
+                if saved_values & item_values:
+                    return str(item.get("device_key") or "").strip()
+            return _preferred_usb_key()
+
+        def _format_usb_details(item: dict[str, Any] | None) -> str:
+            if not item:
+                return "USB-принтер не выбран."
+            printer_name = str(item.get("printer_name") or "").strip()
+            port_name = str(item.get("port_name") or "").strip()
+            lines = [
+                f"Устройство: {str(item.get('friendly_name') or '—').strip()}",
+                f"Порт: {port_name or '—'}",
+                f"Принтер Windows: {printer_name or 'не используется'}",
+            ]
+            manufacturer = str(item.get("manufacturer") or "").strip()
+            status = str(item.get("status") or "").strip()
+            if manufacturer:
+                lines.append(f"Производитель: {manufacturer}")
+            if status:
+                lines.append(f"Статус: {status}")
+            vid = str(item.get("vid") or "").strip()
+            pid = str(item.get("pid") or "").strip()
+            if vid or pid:
+                lines.append(f"VID/PID: {vid or '—'} / {pid or '—'}")
+            device_id = str(item.get("instance_id") or item.get("pnp_device_id") or "").strip()
+            if device_id:
+                lines.append(f"ID: {device_id}")
+            if _is_generic_usb_device(item):
+                lines.append("Режим печати: совместимый USB text.")
+            else:
+                lines.append("Режим печати: USB raw ESC/POS.")
+            return "\n".join(lines)
+
+        _usb_initial_key = _initial_usb_key()
+        dd_usb = ft.Dropdown(
+            label="USB-принтер",
+            width=460,
+            value=_usb_initial_key or None,
+            options=_dropdown_options(_usb_option_pairs(), _usb_initial_key),
+        )
+        txt_usb_count = ft.Text("", size=12, color=UI_MUTED)
+        tf_usb_details = ft.TextField(
+            label="Информация об устройстве",
+            value="",
+            multiline=True,
+            min_lines=5,
+            max_lines=7,
+            read_only=True,
             dense=True,
-            width=420,
+            width=460,
         )
-        dd_lpt_driver = ft.Dropdown(
-            label="LPT-протокол",
-            width=420,
-            value=str(cur.get("lpt_driver") or "escpos"),
-            options=_dropdown_options_with_current(
-                get_lpt_driver_options(),
-                str(cur.get("lpt_driver") or "escpos"),
-            ),
-        )
-        dd_lpt_eol = ft.Dropdown(
-            label="Завершение строки",
-            width=420,
-            value=str(cur.get("lpt_line_ending") or "lf"),
-            options=_dropdown_options_with_current(
-                get_lpt_line_ending_options(),
-                str(cur.get("lpt_line_ending") or "lf"),
-            ),
-        )
-        dd_escpos_profile = ft.Dropdown(
-            label="Модель / профиль ESC/POS",
-            width=420,
-            value=str(cur.get("escpos_profile") or "default"),
-            options=_dropdown_options_with_current(
-                get_profile_options(),
-                str(cur.get("escpos_profile") or "default"),
-            ),
-        )
-        dd_encoding = ft.Dropdown(
-            label="Кодировка текста",
-            width=420,
-            value=str(cur.get("text_encoding") or "wpc1251"),
-            options=_dropdown_options_with_current(
-                get_codepage_options(),
-                str(cur.get("text_encoding") or "wpc1251"),
-            ),
+        btn_refresh_usb = ft.OutlinedButton(
+            "Обновить список USB",
+            icon=ft.Icons.REFRESH,
         )
 
-        def _opt_str(v: Any) -> str:
-            if v is None:
-                return ""
-            return str(v)
+        def _set_usb_selection(device_key: str | None, *, prefer_auto: bool = False) -> None:
+            key = (device_key or "").strip()
+            if key not in _usb_lookup:
+                key = _preferred_usb_key() if prefer_auto else ""
+            dd_usb.value = key if key in _usb_lookup else None
+            tf_usb_details.value = _format_usb_details(_usb_lookup.get(dd_usb.value or ""))
 
-        tf_escpos_table = ft.TextField(
-            label="Таблица ESC t (0–255)",
-            value=_opt_str(cur.get("escpos_table")),
-            hint_text=(
-                "Пусто: авто по выбранному профилю ESC/POS. Указали число — уходит как есть. "
-                "Кракозябры — поменяйте кодировку, слот ESC t или LPT-протокол."
-            ),
-            dense=True,
-            width=420,
-        )
-        tf_esc_r = ft.TextField(
-            label="ESC R международный набор (0–255)",
-            value=_opt_str(cur.get("esc_r")),
-            hint_text="Обычно пусто; редко 0 или 6",
-            dense=True,
-            width=420,
-        )
+        def _reload_usb_devices(preferred_key: str | None = None) -> None:
+            nonlocal _usb_devices, _usb_lookup
+            _usb_devices = _list_usb_devices()
+            _usb_lookup = {
+                str(item.get("device_key") or "").strip(): item
+                for item in _usb_devices
+                if str(item.get("device_key") or "").strip()
+            }
+            txt_usb_count.value = (
+                f"Найдено USB-принтеров: {len(_usb_devices)}"
+                if _usb_devices
+                else "USB-принтеры не найдены. Проверьте подключение принтера и обновите список."
+            )
+            current_key = (preferred_key or dd_usb.value or "").strip()
+            dd_usb.options = _dropdown_options(_usb_option_pairs(), current_key)
+            _set_usb_selection(current_key, prefer_auto=True)
+
+        def _selected_usb_item() -> dict[str, Any] | None:
+            return _usb_lookup.get((dd_usb.value or "").strip())
 
         def collect() -> dict[str, Any]:
-            fp = (tf_lpt.value or "LPT1").strip() or "LPT1"
-            enc = (dd_encoding.value or "wpc1251").strip().lower()
-            et = (tf_escpos_table.value or "").strip()
+            usb_item = _selected_usb_item()
+            usb_printer_name = str((usb_item or {}).get("printer_name") or "").strip()
+            usb_port_name = str((usb_item or {}).get("port_name") or "").strip()
+            use_text_mode = _is_generic_usb_device(usb_item)
             return {
-                "receipt_print_mode": (tf_mode.value or "lpt").strip().lower(),
-                "gdi_printer_name": (tf_gdi.value or "").strip(),
-                "backend": "lpt",
-                "file_path": fp,
-                "lpt_driver": (dd_lpt_driver.value or "escpos").strip().lower(),
-                "lpt_line_ending": (dd_lpt_eol.value or "lf").strip().lower(),
-                "text_encoding": enc,
-                "escpos_profile": (dd_escpos_profile.value or "default").strip(),
-                "escpos_table": et,
-                "esc_r": (tf_esc_r.value or "").strip(),
+                "receipt_print_mode": "lpt",
+                "gdi_printer_name": "",
+                "backend": "usb",
+                "file_path": usb_port_name or usb_printer_name,
+                "usb_device_id": str((usb_item or {}).get("device_key") or "").strip(),
+                "usb_printer_name": usb_printer_name,
+                "usb_friendly_name": str((usb_item or {}).get("friendly_name") or "").strip(),
+                "usb_port_name": usb_port_name,
+                "usb_vendor_id": str((usb_item or {}).get("vid") or "").strip(),
+                "usb_product_id": str((usb_item or {}).get("pid") or "").strip(),
+                "lpt_driver": "text" if use_text_mode else "escpos",
+                "lpt_line_ending": "crlf" if use_text_mode else "lf",
+                "text_encoding": "cp866",
+                "escpos_profile": "default",
+                "escpos_table": "17",
+                "esc_r": "",
             }
 
         def do_save(_e):
             try:
-                printer_config.save(collect())
+                data = collect()
+                if not (data.get("file_path") or "").strip():
+                    snack("Выберите USB-принтер из списка", ft.Colors.AMBER_700)
+                    return
+                printer_config.save(data)
                 page.pop_dialog()
                 page.update()
-                snack("Настройки принтера сохранены", ft.Colors.GREEN_700)
+                snack("USB-принтер сохранён", ft.Colors.GREEN_700)
             except OSError as ex:
                 snack(f"Не удалось записать файл: {ex}", ft.Colors.RED_700)
 
@@ -2482,21 +2866,33 @@ def main(page: ft.Page):
             set_loading(True)
             try:
                 data = collect()
+                if not (data.get("file_path") or "").strip():
+                    snack("Выберите USB-принтер из списка", ft.Colors.AMBER_700)
+                    return
                 printer_config.apply(data)
                 if not is_receipt_printing_enabled():
-                    if (data.get("receipt_print_mode") or "lpt").strip().lower() == "gdi":
-                        snack("Укажите имя Windows-принтера", ft.Colors.AMBER_700)
-                    else:
-                        snack("Укажите LPT-порт принтера, например LPT1", ft.Colors.AMBER_700)
+                    snack("USB-принтер не готов к печати", ft.Colors.AMBER_700)
                     return
-                print_printer_self_check_page()
-                snack("Страница самопроверки отправлена на принтер", ft.Colors.GREEN_700)
+                print_printer_usb_test()
+                snack("USB-тест отправлен. Подробности в usb_print.log рядом с файлом данных.", ft.Colors.GREEN_700)
             except ReceiptPrinterError as ex:
                 snack(str(ex), ft.Colors.RED_700)
             except OSError as ex:
                 snack(str(ex), ft.Colors.RED_700)
             finally:
                 set_loading(False)
+
+        def _use_selected_usb(_e=None):
+            _set_usb_selection(dd_usb.value, prefer_auto=False)
+            page.update()
+
+        def _refresh_usb_devices(_e=None):
+            _reload_usb_devices(preferred_key=dd_usb.value or _preferred_usb_key())
+            page.update()
+
+        dd_usb.on_change = _use_selected_usb
+        btn_refresh_usb.on_click = _refresh_usb_devices
+        _reload_usb_devices(preferred_key=_usb_initial_key)
 
         dlg = ft.AlertDialog(
             modal=True,
@@ -2518,48 +2914,36 @@ def main(page: ft.Page):
                             selectable=True,
                         ),
                         ft.Text(
-                            "«Сохранить» записывает в файл и перезапускает не нужен. "
-                            "«Тест» применяет значения из формы и печатает пробную строку.",
+                            "Оставлено только USB-подключение. Приложение само находит USB-принтеры и сохраняет выбранное устройство.",
                             size=12,
                             color=UI_MUTED,
                         ),
                         ft.Text(
-                            "Можно печатать либо через LPT/ESC-POS, либо через системный Windows-драйвер (GDI). "
-                            "Для GDI укажите точное имя установленного принтера.",
+                            "Для устройств вроде `PrinterPOS-80 / USB001` автоматически включается совместимый USB text режим.",
                             size=12,
                             color=UI_MUTED,
                         ),
                         ft.Text(
-                            "Для LPT теперь доступны два режима: ESC/POS raw и plain text raw. "
-                            "Если чек печатается кракозябрами или принтер не понимает ESC-команды, "
-                            "переключите протокол, codepage и LF/CRLF.",
+                            "После USB-теста подробности пишутся в usb_print.log рядом с файлом данных приложения.",
                             size=12,
                             color=UI_MUTED,
                         ),
-                        tf_mode,
-                        ft.Text("WINDOWS / GDI", size=12, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                        dd_gdi,
-                        tf_gdi,
-                        ft.Text("LPT", size=12, weight=ft.FontWeight.W_600, color=UI_TEXT),
-                        tf_lpt,
-                        dd_lpt_driver,
-                        dd_lpt_eol,
-                        dd_escpos_profile,
-                        dd_encoding,
-                        tf_escpos_table,
-                        tf_esc_r,
+                        txt_usb_count,
+                        btn_refresh_usb,
+                        dd_usb,
+                        tf_usb_details,
                     ],
                     tight=True,
                     scroll=ft.ScrollMode.AUTO,
                     width=460,
                 ),
-                height=480,
+                height=360,
                 padding=ft.Padding.only(right=8),
             ),
             actions=[
                 ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
                 ft.OutlinedButton(
-                    "Самопроверка",
+                    "USB-тест",
                     icon=ft.Icons.FACT_CHECK_OUTLINED,
                     style=ft.ButtonStyle(
                         color=UI_MUTED,
@@ -2932,8 +3316,28 @@ def main(page: ft.Page):
                     expand=True,
                     border_radius=10,
                     filled=True,
+                    on_focus=lambda _e: _show_keyboard_for(
+                        search_field_ref.current,
+                        title="Поиск товаров",
+                        layout="alpha",
+                        submit=on_search_submit,
+                        on_change=on_search_change,
+                    ),
                     on_change=on_search_change,
                     on_submit=on_search_submit,
+                ),
+                ft.IconButton(
+                    ft.Icons.KEYBOARD_OUTLINED,
+                    tooltip="Мини-клавиатура",
+                    icon_color=UI_TEXT,
+                    style=ft.ButtonStyle(bgcolor=UI_SURFACE_ELEV),
+                    on_click=lambda _e: _show_keyboard_for(
+                        search_field_ref.current,
+                        title="Поиск товаров",
+                        layout="alpha",
+                        submit=on_search_submit,
+                        on_change=on_search_change,
+                    ),
                 ),
                 ft.IconButton(
                     ft.Icons.SEARCH,
@@ -3046,6 +3450,12 @@ def main(page: ft.Page):
                                 hint_text="10",
                                 dense=True,
                                 expand=True,
+                                on_focus=lambda _e: _show_keyboard_for(
+                                    order_discount_pct_ref.current,
+                                    title="Скидка, %",
+                                    layout="numeric",
+                                    submit=apply_order_discount,
+                                ),
                                 on_submit=apply_order_discount,
                             ),
                             ft.TextField(
@@ -3054,6 +3464,12 @@ def main(page: ft.Page):
                                 hint_text="50",
                                 dense=True,
                                 expand=True,
+                                on_focus=lambda _e: _show_keyboard_for(
+                                    order_discount_sum_ref.current,
+                                    title="Скидка, сумма",
+                                    layout="numeric",
+                                    submit=apply_order_discount,
+                                ),
                                 on_submit=apply_order_discount,
                             ),
                         ],
@@ -3378,6 +3794,7 @@ def main(page: ft.Page):
                     expand=True,
                     spacing=0,
                 ),
+                build_keyboard_overlay(),
                 build_loading_overlay(),
             ],
             expand=True,

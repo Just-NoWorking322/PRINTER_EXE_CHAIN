@@ -16,6 +16,80 @@ from escpos.escpos import Escpos
 _LPT_RE = re.compile(r"^LPT(\d+)$", re.I)
 
 
+def _looks_like_explicit_device_path(raw: str) -> bool:
+    s = (raw or "").strip().replace("/", "\\")
+    if not s:
+        return False
+    if _LPT_RE.match(s):
+        return True
+    if s.lower().startswith("\\\\.\\") or s.lower().startswith("//./"):
+        return True
+    if len(s) >= 2 and s[1] == ":":
+        return True
+    return "\\" in s
+
+
+def _resolve_windows_printer_name(raw: str) -> str | None:
+    """Вернуть точное имя установленного Windows-принтера, если оно похоже на printer name."""
+    s = (raw or "").strip()
+    if not s or sys.platform != "win32":
+        return None
+    if _looks_like_explicit_device_path(s):
+        return None
+    try:
+        import win32print
+
+        flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+        rows = win32print.EnumPrinters(flags, None, 4)
+    except Exception:
+        return s
+
+    exact: str | None = None
+    lower = s.lower()
+    for row in rows:
+        if not (isinstance(row, tuple) and len(row) >= 3):
+            continue
+        name = str(row[2] or "").strip()
+        if not name:
+            continue
+        if name == s:
+            exact = name
+            break
+        if name.lower() == lower:
+            exact = name
+    return exact or s
+
+
+def _write_bytes_to_windows_printer(printer_name: str, data: bytes) -> None:
+    import win32print
+
+    hprinter = None
+    job_id = None
+    try:
+        hprinter = win32print.OpenPrinter(printer_name)
+        job_id = win32print.StartDocPrinter(
+            hprinter,
+            1,
+            ("NurMarketKassa receipt", None, "RAW"),
+        )
+        win32print.StartPagePrinter(hprinter)
+        win32print.WritePrinter(hprinter, data)
+        win32print.EndPagePrinter(hprinter)
+        win32print.EndDocPrinter(hprinter)
+        job_id = None
+    finally:
+        if hprinter is not None:
+            if job_id is not None:
+                try:
+                    win32print.EndDocPrinter(hprinter)
+                except Exception:
+                    pass
+            try:
+                win32print.ClosePrinter(hprinter)
+            except Exception:
+                pass
+
+
 def expand_lpt_device_paths(raw: str) -> list[str]:
     """Варианты пути для одного логического порта (порядок: сначала \\\\.\\ — обычно надёжнее)."""
     s = (raw or "").strip().replace("/", "\\")
@@ -149,11 +223,23 @@ def write_lpt_bytes(devfile: str, data: bytes, *, append_lf_if_missing: bool = T
     if append_lf_if_missing and blob and not blob.endswith(b"\n"):
         blob = blob + b"\n"
 
+    printer_name = _resolve_windows_printer_name(devfile)
+    if printer_name is not None:
+        try:
+            _write_bytes_to_windows_printer(printer_name, blob)
+            return
+        except BaseException as e:
+            printer_error = f"{printer_name} (WinSpool RAW): {e}"
+    else:
+        printer_error = None
+
     paths = expand_lpt_device_paths(devfile)
     if not paths:
         paths = [(devfile or "").strip() or "LPT1"]
 
     errors: list[str] = []
+    if printer_error:
+        errors.append(printer_error)
 
     for p in paths:
         try:

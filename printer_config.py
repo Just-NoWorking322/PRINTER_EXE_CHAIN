@@ -22,13 +22,19 @@ def as_dict() -> dict[str, Any]:
 
     return {
         "receipt_print_mode": getattr(c, "RECEIPT_PRINT_MODE", "lpt"),
-        "gdi_printer_name": getattr(c, "RECEIPT_GDI_PRINTER_NAME", "RONGTA 58mm Series Printer"),
-        "backend": "lpt",
-        "file_path": getattr(c, "RECEIPT_FILE_PATH", "LPT1"),
-        "lpt_driver": getattr(c, "RECEIPT_LPT_DRIVER", "escpos"),
-        "lpt_line_ending": getattr(c, "RECEIPT_LPT_LINE_ENDING", "lf"),
-        "text_encoding": getattr(c, "RECEIPT_TEXT_ENCODING", "wpc1251"),
-        "escpos_table": getattr(c, "RECEIPT_ESCPOS_TABLE_BYTE", None),
+        "gdi_printer_name": getattr(c, "RECEIPT_GDI_PRINTER_NAME", ""),
+        "backend": getattr(c, "RECEIPT_PRINTER_BACKEND", "usb"),
+        "file_path": getattr(c, "RECEIPT_FILE_PATH", ""),
+        "usb_device_id": getattr(c, "RECEIPT_USB_DEVICE_ID", ""),
+        "usb_printer_name": getattr(c, "RECEIPT_USB_PRINTER_NAME", ""),
+        "usb_friendly_name": getattr(c, "RECEIPT_USB_FRIENDLY_NAME", ""),
+        "usb_port_name": getattr(c, "RECEIPT_USB_PORT_NAME", ""),
+        "usb_vendor_id": getattr(c, "RECEIPT_USB_VENDOR_ID", ""),
+        "usb_product_id": getattr(c, "RECEIPT_USB_PRODUCT_ID", ""),
+        "lpt_driver": getattr(c, "RECEIPT_LPT_DRIVER", "text"),
+        "lpt_line_ending": getattr(c, "RECEIPT_LPT_LINE_ENDING", "crlf"),
+        "text_encoding": getattr(c, "RECEIPT_TEXT_ENCODING", "cp866"),
+        "escpos_table": getattr(c, "RECEIPT_ESCPOS_TABLE_BYTE", 17),
         "esc_r": getattr(c, "RECEIPT_ESC_R_BYTE", None),
         "escpos_profile": getattr(c, "RECEIPT_ESCPOS_PROFILE", None) or "default",
         "scale_port": getattr(c, "SCALE_COM_PORT", "COM3"),
@@ -62,14 +68,27 @@ def apply(data: dict[str, Any]) -> None:
         c.RECEIPT_PRINT_MODE = str(data["receipt_print_mode"]).strip().lower()
     _s("gdi_printer_name", "RECEIPT_GDI_PRINTER_NAME")
 
-    c.RECEIPT_PRINTER_BACKEND = "lpt"
+    backend_raw = str(data.get("backend") or getattr(c, "RECEIPT_PRINTER_BACKEND", "usb")).strip().lower()
+    c.RECEIPT_PRINTER_BACKEND = "usb" if backend_raw else "usb"
+    _s("usb_device_id", "RECEIPT_USB_DEVICE_ID")
+    _s("usb_printer_name", "RECEIPT_USB_PRINTER_NAME")
+    _s("usb_friendly_name", "RECEIPT_USB_FRIENDLY_NAME")
+    _s("usb_port_name", "RECEIPT_USB_PORT_NAME")
+    _s("usb_vendor_id", "RECEIPT_USB_VENDOR_ID")
+    _s("usb_product_id", "RECEIPT_USB_PRODUCT_ID")
     _s("file_path", "RECEIPT_FILE_PATH")
     if not getattr(c, "RECEIPT_FILE_PATH", "").strip():
-        c.RECEIPT_FILE_PATH = "LPT1"
+        if c.RECEIPT_PRINTER_BACKEND == "usb":
+            c.RECEIPT_FILE_PATH = (
+                getattr(c, "RECEIPT_USB_PORT_NAME", "").strip()
+                or getattr(c, "RECEIPT_USB_PRINTER_NAME", "").strip()
+            )
+        else:
+            c.RECEIPT_FILE_PATH = "LPT1"
     if "lpt_driver" in data and data["lpt_driver"] is not None:
-        c.RECEIPT_LPT_DRIVER = str(data["lpt_driver"]).strip().lower() or "escpos"
+        c.RECEIPT_LPT_DRIVER = str(data["lpt_driver"]).strip().lower() or "text"
     if "lpt_line_ending" in data and data["lpt_line_ending"] is not None:
-        c.RECEIPT_LPT_LINE_ENDING = str(data["lpt_line_ending"]).strip().lower() or "lf"
+        c.RECEIPT_LPT_LINE_ENDING = str(data["lpt_line_ending"]).strip().lower() or "crlf"
     _s("text_encoding", "RECEIPT_TEXT_ENCODING")
 
     def _opt_int_key(key: str, attr: str) -> None:

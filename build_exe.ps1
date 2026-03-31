@@ -55,7 +55,13 @@ $addData = "$capJson;escpos"
     --hidden-import serial `
     --hidden-import serial.tools.list_ports `
     --hidden-import usb.core `
-    --hidden-import usb.util
+    --hidden-import usb.util `
+    --hidden-import win32print `
+    --hidden-import win32file `
+    --hidden-import win32con `
+    --hidden-import pywintypes `
+    --hidden-import win32api `
+    --hidden-import win32ui
 
 Write-Host ""
 Write-Host "Done:" $exeOut
