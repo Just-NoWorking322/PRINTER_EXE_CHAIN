@@ -41,6 +41,12 @@ import app_database
 import local_products_cache
 import config
 import printer_config
+from receipt_lpt import (
+    get_codepage_options,
+    get_lpt_driver_options,
+    get_lpt_line_ending_options,
+    get_profile_options,
+)
 from receipt_printer import (
     ReceiptPrinterError,
     is_receipt_printing_enabled,
@@ -2319,6 +2325,66 @@ def main(page: ft.Page):
 
     def open_printer_settings_dlg(_):
         cur = printer_config.as_dict()
+
+        def _list_windows_printers() -> list[str]:
+            try:
+                import win32print
+
+                flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+                rows = win32print.EnumPrinters(flags, None, 4)
+                names: list[str] = []
+                for row in rows:
+                    if isinstance(row, tuple) and len(row) >= 3:
+                        name = str(row[2] or "").strip()
+                        if name:
+                            names.append(name)
+                return sorted(set(names), key=lambda x: x.lower())
+            except Exception:
+                return []
+
+        def _dropdown_options_with_current(
+            pairs: list[tuple[str, str]],
+            current: str,
+        ) -> list[ft.dropdown.Option]:
+            opts = [ft.dropdown.Option(key=key, text=label) for key, label in pairs]
+            cur_key = (current or "").strip()
+            if cur_key and not any(str(opt.key) == cur_key for opt in opts):
+                opts.insert(0, ft.dropdown.Option(key=cur_key, text=f"{cur_key} (текущее значение)"))
+            return opts
+
+        tf_mode = ft.Dropdown(
+            label="Способ печати чека",
+            width=420,
+            value=str(cur.get("receipt_print_mode") or "lpt"),
+            options=[
+                ft.dropdown.Option(key="lpt", text="LPT / ESC-POS"),
+                ft.dropdown.Option(key="gdi", text="Windows / GDI"),
+            ],
+        )
+        _gdi_initial = str(cur.get("gdi_printer_name") or "RONGTA 58mm Series Printer")
+        _gdi_names = _list_windows_printers()
+        _gdi_options = [ft.dropdown.Option(key=name, text=name) for name in _gdi_names]
+        if _gdi_initial and _gdi_initial not in _gdi_names:
+            _gdi_options.insert(0, ft.dropdown.Option(key=_gdi_initial, text=f"{_gdi_initial} (текущий)"))
+        dd_gdi = ft.Dropdown(
+            label="Выбрать установленный Windows-принтер",
+            width=420,
+            value=_gdi_initial if _gdi_options else None,
+            options=_gdi_options,
+        )
+        tf_gdi = ft.TextField(
+            label="Windows/GDI: имя принтера",
+            value=_gdi_initial,
+            hint_text="Точное имя из «Устройства и принтеры»",
+            dense=True,
+            width=420,
+        )
+        if dd_gdi.options:
+            def _use_selected_gdi(_e=None):
+                tf_gdi.value = (dd_gdi.value or "").strip()
+                page.update()
+
+            dd_gdi.on_change = _use_selected_gdi
         tf_lpt = ft.TextField(
             label="LPT-порт чека",
             value=str(cur.get("file_path") or "LPT1"),
@@ -2326,31 +2392,41 @@ def main(page: ft.Page):
             dense=True,
             width=420,
         )
+        dd_lpt_driver = ft.Dropdown(
+            label="LPT-протокол",
+            width=420,
+            value=str(cur.get("lpt_driver") or "escpos"),
+            options=_dropdown_options_with_current(
+                get_lpt_driver_options(),
+                str(cur.get("lpt_driver") or "escpos"),
+            ),
+        )
+        dd_lpt_eol = ft.Dropdown(
+            label="Завершение строки",
+            width=420,
+            value=str(cur.get("lpt_line_ending") or "lf"),
+            options=_dropdown_options_with_current(
+                get_lpt_line_ending_options(),
+                str(cur.get("lpt_line_ending") or "lf"),
+            ),
+        )
         dd_escpos_profile = ft.Dropdown(
             label="Модель / профиль ESC/POS",
             width=420,
             value=str(cur.get("escpos_profile") or "default"),
-            options=[
-                ft.dropdown.Option(key="default", text="Универсальный профиль"),
-                ft.dropdown.Option(
-                    key="TEP-200M",
-                    text="Cashino EP-200 / TEP200M (WPC1251, слот таблицы 46)",
-                ),
-            ],
+            options=_dropdown_options_with_current(
+                get_profile_options(),
+                str(cur.get("escpos_profile") or "default"),
+            ),
         )
         dd_encoding = ft.Dropdown(
             label="Кодировка текста",
             width=420,
             value=str(cur.get("text_encoding") or "wpc1251"),
-            options=[
-                ft.dropdown.Option(key="cp866", text="CP866 — кириллица (DOS/OEM)"),
-                ft.dropdown.Option(key="cp1251", text="CP1251 — Windows-1251"),
-                ft.dropdown.Option(
-                    key="wpc1251",
-                    text="WPC1251 — как в документации ESC/POS (рекомендуется для Cashino EP-200)",
-                ),
-                ft.dropdown.Option(key="utf-8", text="UTF-8 — печать как CP1251/WPC1251"),
-            ],
+            options=_dropdown_options_with_current(
+                get_codepage_options(),
+                str(cur.get("text_encoding") or "wpc1251"),
+            ),
         )
 
         def _opt_str(v: Any) -> str:
@@ -2362,8 +2438,8 @@ def main(page: ft.Page):
             label="Таблица ESC t (0–255)",
             value=_opt_str(cur.get("escpos_table")),
             hint_text=(
-                "Пусто: авто (CP866→17, WPC1251/CP1251→46). Указали число — уходит как есть "
-                "(на части Cashino+LPT читаемее CP866+46). Кракозябры — поменяйте пару кодировка/слот."
+                "Пусто: авто по выбранному профилю ESC/POS. Указали число — уходит как есть. "
+                "Кракозябры — поменяйте кодировку, слот ESC t или LPT-протокол."
             ),
             dense=True,
             width=420,
@@ -2381,8 +2457,12 @@ def main(page: ft.Page):
             enc = (dd_encoding.value or "wpc1251").strip().lower()
             et = (tf_escpos_table.value or "").strip()
             return {
+                "receipt_print_mode": (tf_mode.value or "lpt").strip().lower(),
+                "gdi_printer_name": (tf_gdi.value or "").strip(),
                 "backend": "lpt",
                 "file_path": fp,
+                "lpt_driver": (dd_lpt_driver.value or "escpos").strip().lower(),
+                "lpt_line_ending": (dd_lpt_eol.value or "lf").strip().lower(),
                 "text_encoding": enc,
                 "escpos_profile": (dd_escpos_profile.value or "default").strip(),
                 "escpos_table": et,
@@ -2401,13 +2481,19 @@ def main(page: ft.Page):
         def do_test(_e):
             set_loading(True)
             try:
-                printer_config.apply(collect())
+                data = collect()
+                printer_config.apply(data)
                 if not is_receipt_printing_enabled():
-                    snack("Укажите LPT-порт принтера, например LPT1", ft.Colors.AMBER_700)
+                    if (data.get("receipt_print_mode") or "lpt").strip().lower() == "gdi":
+                        snack("Укажите имя Windows-принтера", ft.Colors.AMBER_700)
+                    else:
+                        snack("Укажите LPT-порт принтера, например LPT1", ft.Colors.AMBER_700)
                     return
                 print_printer_self_check_page()
                 snack("Страница самопроверки отправлена на принтер", ft.Colors.GREEN_700)
             except ReceiptPrinterError as ex:
+                snack(str(ex), ft.Colors.RED_700)
+            except OSError as ex:
                 snack(str(ex), ft.Colors.RED_700)
             finally:
                 set_loading(False)
@@ -2438,13 +2524,26 @@ def main(page: ft.Page):
                             color=UI_MUTED,
                         ),
                         ft.Text(
-                            "Для чека поддерживается только LPT. По умолчанию используется кириллица WPC1251. "
-                            "Если на вашем принтере текст искажён, попробуйте CP866 и таблицу 17.",
+                            "Можно печатать либо через LPT/ESC-POS, либо через системный Windows-драйвер (GDI). "
+                            "Для GDI укажите точное имя установленного принтера.",
                             size=12,
                             color=UI_MUTED,
                         ),
+                        ft.Text(
+                            "Для LPT теперь доступны два режима: ESC/POS raw и plain text raw. "
+                            "Если чек печатается кракозябрами или принтер не понимает ESC-команды, "
+                            "переключите протокол, codepage и LF/CRLF.",
+                            size=12,
+                            color=UI_MUTED,
+                        ),
+                        tf_mode,
+                        ft.Text("WINDOWS / GDI", size=12, weight=ft.FontWeight.W_600, color=UI_TEXT),
+                        dd_gdi,
+                        tf_gdi,
                         ft.Text("LPT", size=12, weight=ft.FontWeight.W_600, color=UI_TEXT),
                         tf_lpt,
+                        dd_lpt_driver,
+                        dd_lpt_eol,
                         dd_escpos_profile,
                         dd_encoding,
                         tf_escpos_table,

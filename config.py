@@ -7,11 +7,22 @@ API_BASE_URL = os.environ.get("DESKTOP_MARKET_API_URL", "https://app.nurcrm.kg")
 TEST_LOGIN_EMAIL = "market@gmail.com"
 TEST_LOGIN_PASSWORD = "12345678!"
 
-# --- Термопринтер ESC/POS: только LPT ---
-# Чек всегда печатается через параллельный порт Windows: LPT1 / LPT2.
+# --- Печать чека ---
+
+# Режимы: lpt = ESC/POS через LPT1/LPT2, gdi = драйвер Windows (Unicode).
+RECEIPT_PRINT_MODE = os.environ.get("DESKTOP_MARKET_RECEIPT_PRINT_MODE", "lpt").strip().lower()
+RECEIPT_GDI_PRINTER_NAME = os.environ.get(
+    "DESKTOP_MARKET_RECEIPT_GDI_PRINTER",
+    "RONGTA 58mm Series Printer",
+).strip()
+# ESC/POS-канал для raw-печати чека.
 RECEIPT_PRINTER_BACKEND = "lpt"
 # Путь LPT для чека; если переменная не задана, используем LPT1.
 RECEIPT_FILE_PATH = os.environ.get("DESKTOP_MARKET_RECEIPT_FILE", "LPT1").strip() or "LPT1"
+# LPT-движок: escpos = команды ESC/POS, text = чистый текст без ESC-последовательностей.
+RECEIPT_LPT_DRIVER = os.environ.get("DESKTOP_MARKET_RECEIPT_LPT_DRIVER", "escpos").strip().lower()
+# Завершение строки для raw-LPT: lf или crlf.
+RECEIPT_LPT_LINE_ENDING = os.environ.get("DESKTOP_MARKET_RECEIPT_LPT_EOL", "lf").strip().lower()
 # Кодировка текста: cp866 | cp1251 | wpc1251 | utf-8 (utf-8 → cp1251; wpc1251 = слот 46)
 # По умолчанию включена кириллица WPC1251 — обычно это надёжный старт для 58 мм ESC/POS по LPT.
 RECEIPT_TEXT_ENCODING = os.environ.get("DESKTOP_MARKET_RECEIPT_ENCODING", "wpc1251").strip()

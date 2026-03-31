@@ -1,13 +1,12 @@
 """
-Печать чека на термопринтере ESC/POS (Xprinter XP-58II, Cashino EP-200 и аналоги).
+Печать чека на Windows: либо через системный GDI-принтер, либо raw-печать на LPT.
 
-Cashino EP-200: в самотесте часто «по умолчанию: CP936 GBK». Для кириллицы: кодировка WPC1251/cp1251
-(или cp866), слот ESC t 46 или 17; перед ESC t всегда шлём ESC % 0 (выход из двухбайтового режима),
-если не отключено DESKTOP_MARKET_RECEIPT_NO_ESC_PCT=1. Профиль TEP-200M в python-escpos — по желанию.
-Опционально: DESKTOP_MARKET_RECEIPT_COERCE_CP866_TABLE=1 — при CP866 принудительно заменить ESC t 46 на 17 (по умолчанию выкл., слот не трогаем).
+Для LPT доступны два режима:
+- ESC/POS raw: печатаем командами ESC/POS, выбираем codepage и при необходимости ESC t вручную.
+- Plain text raw: отправляем только текст в выбранной кодировке, без ESC-команд.
 
-Требуется: pip install python-escpos
-Поддерживается только печать чека через LPT (LPT1 / LPT2) с явной установкой кодовой страницы ESC/POS.
+Это позволяет запускать кассу не только с типовыми 58 мм ESC/POS-принтерами,
+но и с более капризными LPT-устройствами, которым нужен чистый текст и CRLF.
 """
 
 from __future__ import annotations
@@ -17,6 +16,13 @@ import os
 import re
 from datetime import datetime
 from typing import Any
+
+from receipt_lpt import (
+    describe_codepage_plan,
+    print_probe_via_lpt,
+    print_rows_via_lpt,
+    print_text_probe_via_lpt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -450,16 +456,61 @@ def _cart_total(cart: dict[str, Any]) -> float:
 
 
 def is_receipt_printing_enabled() -> bool:
-    from config import RECEIPT_FILE_PATH, RECEIPT_PRINTER_BACKEND
+    from config import (
+        RECEIPT_FILE_PATH,
+        RECEIPT_GDI_PRINTER_NAME,
+        RECEIPT_PRINT_MODE,
+        RECEIPT_PRINTER_BACKEND,
+    )
 
+    if (RECEIPT_PRINT_MODE or "lpt").strip().lower() == "gdi":
+        return bool((RECEIPT_GDI_PRINTER_NAME or "").strip())
     b = (RECEIPT_PRINTER_BACKEND or "").strip().lower()
     return b == "lpt" and bool((RECEIPT_FILE_PATH or "").strip())
+
+
+def _use_gdi_print() -> bool:
+    from config import RECEIPT_PRINT_MODE
+
+    return (RECEIPT_PRINT_MODE or "lpt").strip().lower() == "gdi"
+
+
+def _current_lpt_settings() -> dict[str, Any]:
+    from config import (
+        RECEIPT_ESC_R_BYTE,
+        RECEIPT_ESCPOS_PROFILE,
+        RECEIPT_ESCPOS_TABLE_BYTE,
+        RECEIPT_FILE_PATH,
+        RECEIPT_LPT_DRIVER,
+        RECEIPT_LPT_LINE_ENDING,
+        RECEIPT_TEXT_ENCODING,
+    )
+
+    return {
+        "devfile": (RECEIPT_FILE_PATH or "LPT1").strip() or "LPT1",
+        "lpt_driver": (RECEIPT_LPT_DRIVER or "escpos").strip().lower(),
+        "line_ending": (RECEIPT_LPT_LINE_ENDING or "lf").strip().lower(),
+        "text_encoding": (RECEIPT_TEXT_ENCODING or "cp866").strip().lower(),
+        "escpos_profile": (RECEIPT_ESCPOS_PROFILE or "default").strip() or "default",
+        "escpos_table_byte": RECEIPT_ESCPOS_TABLE_BYTE,
+        "esc_r_byte": RECEIPT_ESC_R_BYTE,
+    }
+
+
+def _print_rows_via_gdi(rows: list[ReceiptRow]) -> None:
+    from config import RECEIPT_GDI_PRINTER_NAME
+    from receipt_gdi import GdiPrintError, print_receipt_rows_gdi
+
+    try:
+        print_receipt_rows_gdi(rows, RECEIPT_GDI_PRINTER_NAME)
+    except GdiPrintError as ex:
+        raise ReceiptPrinterError(str(ex)) from ex
 
 
 def _open_printer():
     """Создаёт LPT-подключение к ESC/POS-принтеру."""
     try:
-        from escpos.printer import File
+        from escpos.printer import File  # noqa: F401 — проверка установки escpos
     except ImportError as e:
         raise ReceiptPrinterError(
             "Не установлен пакет python-escpos. Выполните: pip install python-escpos"
@@ -479,9 +530,15 @@ def _open_printer():
 
     if backend == "lpt":
         dev = (RECEIPT_FILE_PATH or "").strip() or "LPT1"
-        p = File(devfile=dev, **_prof_kw)
-        p.open()
-        return p
+        try:
+            from lpt_windows import open_escpos_lpt
+
+            return open_escpos_lpt(dev, **_prof_kw)
+        except OSError as e:
+            raise ReceiptPrinterError(
+                f"Не удалось открыть LPT «{dev}»: {e}. "
+                "Проверьте в Windows: принтер на порту LPT1/LPT2; для USB без LPT — режим GDI."
+            ) from e
 
     raise ReceiptPrinterError("Печать чека поддерживается только через LPT1 / LPT2")
 
@@ -620,7 +677,12 @@ def print_printer_self_check_page() -> None:
     """
     from config import (
         RECEIPT_ESCPOS_PROFILE,
+        RECEIPT_ESCPOS_TABLE_BYTE,
         RECEIPT_FILE_PATH,
+        RECEIPT_GDI_PRINTER_NAME,
+        RECEIPT_LPT_DRIVER,
+        RECEIPT_LPT_LINE_ENDING,
+        RECEIPT_PRINT_MODE,
         RECEIPT_PRINTER_BACKEND,
         RECEIPT_TEXT_ENCODING,
     )
@@ -630,6 +692,46 @@ def print_printer_self_check_page() -> None:
     profile = (RECEIPT_ESCPOS_PROFILE or "универсальный").strip()
     back = (RECEIPT_PRINTER_BACKEND or "none").strip().lower()
     lpt = (RECEIPT_FILE_PATH or "LPT1").strip() or "LPT1"
+    lpt_driver = (RECEIPT_LPT_DRIVER or "escpos").strip().lower()
+    line_ending = (RECEIPT_LPT_LINE_ENDING or "lf").strip().lower()
+    mode = (RECEIPT_PRINT_MODE or "lpt").strip().lower()
+    gdi_name = (RECEIPT_GDI_PRINTER_NAME or "").strip()
+    cp_plan = describe_codepage_plan(
+        text_encoding=enc,
+        escpos_profile=RECEIPT_ESCPOS_PROFILE,
+        escpos_table_byte=RECEIPT_ESCPOS_TABLE_BYTE,
+    )
+    if mode != "gdi":
+        try:
+            if lpt_driver == "escpos":
+                print_probe_via_lpt(
+                    devfile=lpt,
+                    line_ending=line_ending,
+                    esc_r_byte=None,
+                    sections=[
+                        ("WPC1251 / TEP-200M / ESC t 46", "wpc1251", "TEP-200M", 46),
+                        ("CP866 / DEFAULT / ESC t 17", "cp866", "default", 17),
+                        ("CP1251 / DEFAULT / ESC t 46", "cp1251", "default", 46),
+                        ("CP1251 / GENERIC / ESC t 51", "cp1251", "default", 51),
+                        ("CP1251 / GENERIC / ESC t 73", "cp1251", "default", 73),
+                        ("CP855 / DEFAULT / ESC t 34", "cp855", "default", 34),
+                    ],
+                )
+            else:
+                print_text_probe_via_lpt(
+                    devfile=lpt,
+                    sections=[
+                        ("CP866 / LF", "cp866", "lf"),
+                        ("CP866 / CRLF", "cp866", "crlf"),
+                        ("CP1251 / LF", "cp1251", "lf"),
+                        ("CP1251 / CRLF", "cp1251", "crlf"),
+                        ("KOI8-R / CRLF", "koi8-r", "crlf"),
+                        ("MAC-CYR / CRLF", "mac-cyrillic", "crlf"),
+                    ],
+                )
+            return
+        except Exception as ex:
+            logger.warning("probe print failed, fallback to standard self-check: %s", ex)
     w = 32
     lines: list[str] = [
         "=" * w,
@@ -649,10 +751,15 @@ def print_printer_self_check_page() -> None:
         "WPC1251 (байты cp1251).",
         "-" * w,
         f"Профиль в приложении: {profile[:28]}",
+        f"LPT драйвер: {lpt_driver}",
+        f"Конец строки: {line_ending}",
         f"Кодировка текста: {enc}",
-        f"Канал: {back}",
+        f"План таблицы: {cp_plan[:28]}",
+        f"Режим: {mode}",
         "-" * w,
-        f"LPT: {str(lpt).strip() or 'LPT1'}",
+        (f"GDI: {gdi_name[:24]}" if mode == "gdi" else f"LPT: {str(lpt).strip() or 'LPT1'}"),
+        "-" * w,
+        (f"Канал ESC/POS: {back}" if mode != "gdi" else "Канал ESC/POS: —"),
         "-" * w,
         "Кириллица (тест):",
         "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ",
@@ -684,15 +791,6 @@ def print_escpos_text_file(devfile: str, text: str) -> None:
     Печать простого текста на указанный LPT/файл с тем же ESC/POS и кодировкой, что и чек.
     Нужна для тестовой печати веса на LPT.
     """
-    try:
-        from escpos.printer import File
-    except ImportError as e:
-        raise ReceiptPrinterError(
-            "Не установлен пакет python-escpos. Выполните: pip install python-escpos"
-        ) from e
-
-    from config import RECEIPT_ESCPOS_PROFILE, RECEIPT_TEXT_ENCODING
-
     raw = (text or "").strip()
     if not raw:
         raise ReceiptPrinterError("Пустой текст")
@@ -700,58 +798,55 @@ def print_escpos_text_file(devfile: str, text: str) -> None:
     path = (devfile or "").strip()
     if not path:
         raise ReceiptPrinterError("Не указан путь (LPT1 или файл)")
-
-    _prof_kw: dict[str, Any] = {}
-    if RECEIPT_ESCPOS_PROFILE:
-        _prof_kw["profile"] = RECEIPT_ESCPOS_PROFILE
-
-    p = File(devfile=path, **_prof_kw)
-    p.open()
-    user_enc = (RECEIPT_TEXT_ENCODING or "cp866").strip().lower()
     lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-
+    rows = _plain_lines_to_receipt_rows(lines)
+    cfg = _current_lpt_settings()
     try:
-        p.hw("INIT")
-        codec = _apply_escpos_codepage(p, user_enc)
-        p.set(align="left", font="a")
-        _apply_escpos_codepage(p, user_enc)
-        rows = _plain_lines_to_receipt_rows(lines)
-        _emit_receipt_rows(p, codec, rows, user_enc)
-        _safe_cut(p)
-    finally:
-        try:
-            p.close()
-        except Exception as ex:
-            logger.warning("close printer: %s", ex)
+        print_rows_via_lpt(
+            devfile=path,
+            rows=rows,
+            lpt_driver=cfg["lpt_driver"],
+            line_ending=cfg["line_ending"],
+            text_encoding=cfg["text_encoding"],
+            escpos_profile=cfg["escpos_profile"],
+            escpos_table_byte=cfg["escpos_table_byte"],
+            esc_r_byte=cfg["esc_r_byte"],
+        )
+    except (OSError, ValueError) as e:
+        raise ReceiptPrinterError(
+            f"Не удалось отправить печать на «{path}»: {e}. "
+            "Проверьте LPT-порт, драйвер LPT и кодировку."
+        ) from e
 
 
 def print_receipt_text(text: str) -> None:
     """
     Печать готового текста чека (с бэкенда: receipt_text или GET …/receipt/).
     """
-    from config import RECEIPT_TEXT_ENCODING
-
     raw = (text or "").strip()
     if not raw:
         raise ReceiptPrinterError("Пустой текст чека")
 
-    p = _open_printer()
-    user_enc = (RECEIPT_TEXT_ENCODING or "cp866").strip().lower()
     lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    rows = _plain_lines_to_receipt_rows(lines)
+    if _use_gdi_print():
+        _print_rows_via_gdi(rows)
+        return
 
+    cfg = _current_lpt_settings()
     try:
-        p.hw("INIT")
-        codec = _apply_escpos_codepage(p, user_enc)
-        p.set(align="left", font="a")
-        _apply_escpos_codepage(p, user_enc)
-        rows = _plain_lines_to_receipt_rows(lines)
-        _emit_receipt_rows(p, codec, rows, user_enc)
-        _safe_cut(p)
-    finally:
-        try:
-            p.close()
-        except Exception as ex:
-            logger.warning("close printer: %s", ex)
+        print_rows_via_lpt(
+            devfile=cfg["devfile"],
+            rows=rows,
+            lpt_driver=cfg["lpt_driver"],
+            line_ending=cfg["line_ending"],
+            text_encoding=cfg["text_encoding"],
+            escpos_profile=cfg["escpos_profile"],
+            escpos_table_byte=cfg["escpos_table_byte"],
+            esc_r_byte=cfg["esc_r_byte"],
+        )
+    except (OSError, ValueError) as e:
+        raise ReceiptPrinterError(str(e)) from e
 
 
 def print_sale_receipt(
@@ -767,10 +862,6 @@ def print_sale_receipt(
     """
     Печать текстового чека. Кириллица: выбор таблицы ESC/POS через charcode (см. RECEIPT_TEXT_ENCODING).
     """
-    from config import RECEIPT_TEXT_ENCODING
-
-    p = _open_printer()
-    user_enc = (RECEIPT_TEXT_ENCODING or "cp866").strip().lower()
     rows = _compose_sale_receipt_rows(
         cart=cart,
         payment_method=payment_method,
@@ -780,19 +871,24 @@ def print_sale_receipt(
         company=company,
         cashier=cashier,
     )
+    if _use_gdi_print():
+        _print_rows_via_gdi(rows)
+        return
 
+    cfg = _current_lpt_settings()
     try:
-        p.hw("INIT")
-        codec = _apply_escpos_codepage(p, user_enc)
-        p.set(align="left", font="a")
-        _apply_escpos_codepage(p, user_enc)
-        _emit_receipt_rows(p, codec, rows, user_enc)
-        _safe_cut(p)
-    finally:
-        try:
-            p.close()
-        except Exception as ex:
-            logger.warning("close printer: %s", ex)
+        print_rows_via_lpt(
+            devfile=cfg["devfile"],
+            rows=rows,
+            lpt_driver=cfg["lpt_driver"],
+            line_ending=cfg["line_ending"],
+            text_encoding=cfg["text_encoding"],
+            escpos_profile=cfg["escpos_profile"],
+            escpos_table_byte=cfg["escpos_table_byte"],
+            esc_r_byte=cfg["esc_r_byte"],
+        )
+    except (OSError, ValueError) as e:
+        raise ReceiptPrinterError(str(e)) from e
 
 
 def try_print_sale_receipt(**kwargs: Any) -> None:

@@ -3,5 +3,6 @@ flet==0.82.2
 flet-desktop==0.82.2
 requests>=2.31.0
 python-escpos>=3.0
+pywin32>=306
 pyserial>=3.5
 pyinstaller>=6.0

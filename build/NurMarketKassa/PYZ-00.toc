@@ -2791,6 +2791,9 @@
    'C:\\Program '
    'Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\\Lib\\logging\\__init__.py',
    'PYMODULE'),
+  ('lpt_windows',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий стол\\принтер\\lpt_windows.py',
+   'PYMODULE'),
   ('lzma',
    'C:\\Program '
    'Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\\Lib\\lzma.py',
@@ -4897,6 +4900,12 @@
   ('random',
    'C:\\Program '
    'Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\\Lib\\random.py',
+   'PYMODULE'),
+  ('receipt_gdi',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий стол\\принтер\\receipt_gdi.py',
+   'PYMODULE'),
+  ('receipt_lpt',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий стол\\принтер\\receipt_lpt.py',
    'PYMODULE'),
   ('receipt_printer',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий стол\\принтер\\receipt_printer.py',

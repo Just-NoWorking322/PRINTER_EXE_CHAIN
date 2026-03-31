@@ -112,10 +112,9 @@ def print_to_lpt(
     lpt = (path or os.environ.get("DESKTOP_MARKET_SCALE_LPT", "LPT1")).strip() or "LPT1"
     data = (text or "").encode(encoding, errors="replace")
     try:
-        with open(lpt, "wb") as f:
-            f.write(data)
-            if not data.endswith(b"\n"):
-                f.write(b"\n")
+        from lpt_windows import write_lpt_bytes
+
+        write_lpt_bytes(lpt, data, append_lf_if_missing=True)
     except OSError as e:
         logger.warning("LPT write failed: %s", e)
         raise
