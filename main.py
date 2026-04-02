@@ -521,6 +521,85 @@ UI_WARN_BG = "#fffbeb"
 UI_WARN_BORDER = "#f59e0b"
 UI_WARN_TEXT = "#b45309"
 
+VK_LAYOUT_RU = (
+    ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+    ("й", "ц", "у", "к", "е", "н", "г", "ш", "щ", "з", "х"),
+    ("ф", "ы", "в", "а", "п", "р", "о", "л", "д", "ж", "э"),
+    ("я", "ч", "с", "м", "и", "т", "ь", "б", "ю", "-", "_"),
+    ("@", ".", ",", "/", "!", "?"),
+)
+VK_LAYOUT_EN = (
+    ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+    ("q", "w", "e", "r", "t", "y", "u", "i", "o", "p"),
+    ("a", "s", "d", "f", "g", "h", "j", "k", "l"),
+    ("z", "x", "c", "v", "b", "n", "m", "-", "_"),
+    ("@", ".", "/", "!", "?"),
+)
+VK_LAYOUT_NUM = (
+    ("1", "2", "3"),
+    ("4", "5", "6"),
+    ("7", "8", "9"),
+    (",", "0", "."),
+)
+QUICK_CATALOG_LIMIT = 45
+PRODUCT_GRID_COLUMNS = 3
+QUICK_CATALOG_PRESETS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "kg": (
+        ("Картошка", ("картошка", "картофель")),
+        ("Помидоры", ("помидоры", "помидор", "томат")),
+        ("Огурцы", ("огурцы", "огурец")),
+        ("Лук", ("лук",)),
+        ("Морковь", ("морковь",)),
+        ("Капуста", ("капуста",)),
+        ("Яблоки", ("яблоки", "яблоко")),
+        ("Бананы", ("бананы", "банан")),
+        ("Апельсины", ("апельсины", "апельсин")),
+        ("Груши", ("груши", "груша")),
+        ("Перец", ("перец", "болгарский перец")),
+        ("Свекла", ("свекла", "свёкла")),
+    ),
+    "common": (
+        ("Хлеб", ("хлеб", "батон")),
+        ("Молоко", ("молоко",)),
+        ("Вода", ("вода",)),
+        ("Сахар", ("сахар",)),
+        ("Масло", ("масло",)),
+        ("Рис", ("рис",)),
+        ("Макароны", ("макароны",)),
+        ("Чай", ("чай",)),
+        ("Кофе", ("кофе",)),
+        ("Сок", ("сок",)),
+        ("Кола", ("кола", "coca cola", "coca-cola")),
+        ("Яйца", ("яйца", "яйцо")),
+    ),
+}
+QUICK_CATALOG_PRIORITY: dict[str, tuple[tuple[str, int], ...]] = {
+    "kg": (
+        ("помид", 1200),
+        ("карто", 1100),
+        ("огур", 900),
+        ("лук", 850),
+        ("морков", 800),
+        ("капуст", 760),
+        ("яблок", 700),
+        ("банан", 650),
+    ),
+    "common": (
+        ("хлеб", 1000),
+        ("молок", 980),
+        ("вода", 950),
+        ("сахар", 920),
+        ("масло", 900),
+        ("рис", 860),
+        ("макарон", 830),
+        ("чай", 800),
+        ("коф", 780),
+        ("сок", 760),
+        ("кола", 740),
+        ("яйц", 720),
+    ),
+}
+
 
 def _section_heading(title: str, subtitle: str | None = None) -> ft.Column:
     """Заголовок блока с акцентной полосой."""
@@ -712,6 +791,10 @@ def main(page: ft.Page):
         "barcode_buf": "",
         "barcode_last_ms": 0.0,
         "search_gen": 0,
+        "quick_catalog_tab": "kg",
+        "quick_catalog_products": {"kg": [], "common": []},
+        "quick_catalog_loading": {"kg": False, "common": False},
+        "quick_catalog_loaded": {"kg": False, "common": False},
     }
 
     error_text = ft.Ref[ft.Text]()
@@ -731,16 +814,29 @@ def main(page: ft.Page):
     weight_scale_text = ft.Ref[ft.Text]()
     weight_scale_status = ft.Ref[ft.Text]()
     scale_state: dict[str, Any] = {"mgr": None}
+    virtual_keyboard_host = ft.Ref[ft.Container]()
+    virtual_keyboard_body = ft.Ref[ft.Column]()
+    virtual_keyboard_bindings: dict[int, dict[str, Any]] = {}
+    virtual_keyboard_state: dict[str, Any] = {
+        "visible": False,
+        "target": None,
+        "layout": "ru",
+        "shift": False,
+        "title": "",
+        "submit_text": "Готово",
+        "submit": None,
+    }
     # Весы: по умолчанию включены; отключить: DESKTOP_MARKET_SCALE_ENABLED=0
     _scale_env = os.environ.get("DESKTOP_MARKET_SCALE_ENABLED", "1").strip().lower()
     scale_feature_enabled = _scale_env not in ("0", "false", "no", "off")
 
-    def set_loading(visible: bool):
+    def set_loading(visible: bool, *, flush: bool = True):
         if loading_overlay.current:
             loading_overlay.current.visible = visible
-            page.update()
+            if flush:
+                page.update()
 
-    def show_error(msg: str):
+    def show_error(msg: str, *, flush: bool = True):
         if error_text.current:
             error_text.current.value = msg
             error_text.current.visible = bool(msg)
@@ -748,12 +844,309 @@ def main(page: ft.Page):
             s = (msg or "").strip()
             cashier_hint_ref.current.value = msg or ""
             cashier_hint_ref.current.visible = bool(s)
-        page.update()
+        if flush:
+            page.update()
 
     def snack(msg: str, color: str | None = None):
         page.snack_bar = ft.SnackBar(ft.Text(msg), bgcolor=color)
         page.snack_bar.open = True
         page.update()
+
+    def _vk_initial_layout(mode: str) -> str:
+        m = (mode or "text").strip().lower()
+        if m in ("numeric", "decimal", "money", "num"):
+            return "num"
+        if m in ("english", "email", "password", "latin", "lpt"):
+            return "en"
+        return "ru"
+
+    def _vk_display_label(token: str) -> str:
+        if token == "SPACE":
+            return "Пробел"
+        if token == "BACKSPACE":
+            return "⌫"
+        if token == "CLEAR":
+            return "Очистить"
+        if token == "DONE":
+            return str(virtual_keyboard_state.get("submit_text") or "Готово")
+        if token == "SHIFT":
+            return "Shift"
+        if token == "LAYOUT_RU":
+            return "RU"
+        if token == "LAYOUT_EN":
+            return "EN"
+        if token == "LAYOUT_NUM":
+            return "123"
+        if token == "HIDE":
+            return "Скрыть"
+        return token
+
+    def _vk_call_submit() -> None:
+        cb = virtual_keyboard_state.get("submit")
+        if not callable(cb):
+            return
+        try:
+            cb(None)
+        except TypeError:
+            cb()
+
+    def hide_virtual_keyboard(_e=None) -> None:
+        virtual_keyboard_state["visible"] = False
+        virtual_keyboard_state["target"] = None
+        host = virtual_keyboard_host.current
+        if host:
+            host.visible = False
+        try:
+            page.update()
+        except Exception:
+            pass
+
+    def dismiss_dialog(_e=None) -> None:
+        hide_virtual_keyboard()
+        page.pop_dialog()
+        page.update()
+
+    def _vk_insert_text(text: str) -> None:
+        target = virtual_keyboard_state.get("target")
+        if target is None:
+            return
+        try:
+            cur = str(target.value or "")
+            target.value = cur + text
+            page.update()
+        except Exception:
+            hide_virtual_keyboard()
+
+    def _vk_backspace() -> None:
+        target = virtual_keyboard_state.get("target")
+        if target is None:
+            return
+        try:
+            cur = str(target.value or "")
+            target.value = cur[:-1]
+            page.update()
+        except Exception:
+            hide_virtual_keyboard()
+
+    def _vk_clear() -> None:
+        target = virtual_keyboard_state.get("target")
+        if target is None:
+            return
+        try:
+            target.value = ""
+            page.update()
+        except Exception:
+            hide_virtual_keyboard()
+
+    def _vk_build_button(
+        token: str,
+        *,
+        active: bool = False,
+        accent: bool = False,
+        expand: int = 1,
+    ) -> ft.Container:
+        bg = UI_SURFACE
+        fg = UI_TEXT
+        border = UI_BORDER
+        if accent:
+            bg = UI_ACCENT
+            fg = UI_TEXT_ON_YELLOW
+            border = UI_ACCENT_DIM
+        elif active:
+            bg = UI_ICON_BADGE_BG
+            fg = UI_TEXT
+            border = UI_ACCENT
+        btn = ft.FilledButton(
+            _vk_display_label(token),
+            height=28,
+            style=ft.ButtonStyle(
+                bgcolor=bg,
+                color=fg,
+                side=ft.BorderSide(1, border),
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding.symmetric(horizontal=3, vertical=3),
+                text_style=ft.TextStyle(size=10, weight=ft.FontWeight.W_500),
+            ),
+            on_click=lambda _e, t=token: _vk_handle_press(t),
+        )
+        return ft.Container(content=btn, expand=expand)
+
+    def _vk_render() -> None:
+        host = virtual_keyboard_host.current
+        body = virtual_keyboard_body.current
+        if not host or not body:
+            return
+        if not virtual_keyboard_state.get("visible"):
+            host.visible = False
+            page.update()
+            return
+        layout = str(virtual_keyboard_state.get("layout") or "ru")
+        shift = bool(virtual_keyboard_state.get("shift"))
+        rows_src = VK_LAYOUT_NUM if layout == "num" else (VK_LAYOUT_EN if layout == "en" else VK_LAYOUT_RU)
+        rows: list[ft.Control] = []
+        title = str(virtual_keyboard_state.get("title") or "Ввод")
+        subtitle = "Русская раскладка" if layout == "ru" else ("English layout" if layout == "en" else "Цифры")
+        toolbar = ft.Row(
+            [
+                ft.Column(
+                    [
+                        ft.Text(title, size=11, weight=ft.FontWeight.W_600, color=UI_SURFACE),
+                        ft.Text(subtitle, size=8, color=UI_SIDEBAR_TEXT),
+                    ],
+                    spacing=1,
+                    tight=True,
+                ),
+                ft.Container(expand=True),
+                _vk_build_button("LAYOUT_RU", active=layout == "ru"),
+                _vk_build_button("LAYOUT_EN", active=layout == "en"),
+                _vk_build_button("LAYOUT_NUM", active=layout == "num"),
+                _vk_build_button("SHIFT", active=shift and layout != "num"),
+                _vk_build_button("HIDE"),
+            ],
+            spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        rows.append(toolbar)
+        for row in rows_src:
+            controls: list[ft.Control] = []
+            for token in row:
+                shown = token.upper() if shift and layout != "num" and token.isalpha() else token
+                controls.append(_vk_build_button(shown))
+            rows.append(ft.Row(controls, spacing=4))
+        if layout == "num":
+            rows.append(
+                ft.Row(
+                    [
+                        _vk_build_button("CLEAR"),
+                        _vk_build_button("00"),
+                        _vk_build_button("BACKSPACE"),
+                        _vk_build_button("DONE", accent=True),
+                    ],
+                    spacing=4,
+                )
+            )
+        else:
+            rows.append(
+                ft.Row(
+                    [
+                        _vk_build_button("CLEAR"),
+                        _vk_build_button("SPACE", expand=3),
+                        _vk_build_button("BACKSPACE"),
+                        _vk_build_button("DONE", accent=True),
+                    ],
+                    spacing=4,
+                )
+            )
+        body.controls = rows
+        host.visible = True
+        page.update()
+
+    def _vk_handle_press(token: str) -> None:
+        if token == "HIDE":
+            hide_virtual_keyboard()
+            return
+        if token == "SHIFT":
+            if str(virtual_keyboard_state.get("layout") or "") != "num":
+                virtual_keyboard_state["shift"] = not bool(virtual_keyboard_state.get("shift"))
+                _vk_render()
+            return
+        if token == "LAYOUT_RU":
+            virtual_keyboard_state["layout"] = "ru"
+            _vk_render()
+            return
+        if token == "LAYOUT_EN":
+            virtual_keyboard_state["layout"] = "en"
+            _vk_render()
+            return
+        if token == "LAYOUT_NUM":
+            virtual_keyboard_state["layout"] = "num"
+            _vk_render()
+            return
+        if token == "BACKSPACE":
+            _vk_backspace()
+            return
+        if token == "CLEAR":
+            _vk_clear()
+            return
+        if token == "SPACE":
+            _vk_insert_text(" ")
+            return
+        if token == "DONE":
+            hide_virtual_keyboard()
+            _vk_call_submit()
+            return
+        _vk_insert_text(token)
+
+    def show_virtual_keyboard(field: ft.TextField) -> None:
+        meta = virtual_keyboard_bindings.get(id(field))
+        if not meta:
+            return
+        virtual_keyboard_state["visible"] = True
+        virtual_keyboard_state["target"] = field
+        virtual_keyboard_state["layout"] = _vk_initial_layout(str(meta.get("mode") or "text"))
+        virtual_keyboard_state["shift"] = False
+        virtual_keyboard_state["title"] = str(meta.get("title") or getattr(field, "label", None) or "Ввод")
+        virtual_keyboard_state["submit_text"] = str(meta.get("submit_text") or "Готово")
+        virtual_keyboard_state["submit"] = meta.get("submit")
+        _vk_render()
+
+    def bind_virtual_keyboard(
+        field: ft.TextField,
+        *,
+        mode: str = "text",
+        title: str = "",
+        submit: Any = None,
+        submit_text: str = "Готово",
+    ) -> ft.TextField:
+        prev_focus = getattr(field, "on_focus", None)
+
+        def _on_focus(e):
+            if callable(prev_focus):
+                prev_focus(e)
+            show_virtual_keyboard(field)
+
+        field.on_focus = _on_focus
+        virtual_keyboard_bindings[id(field)] = {
+            "mode": mode,
+            "title": title,
+            "submit": submit,
+            "submit_text": submit_text,
+        }
+        return field
+
+    page.overlay.append(
+        ft.Stack(
+            [
+                ft.Container(
+                    ref=virtual_keyboard_host,
+                    visible=False,
+                    left=6,
+                    right=6,
+                    bottom=6,
+                    content=ft.Row(
+                        [
+                            ft.Container(
+                                width=460,
+                                bgcolor=UI_SIDEBAR,
+                                border_radius=12,
+                                padding=8,
+                                border=ft.Border.all(1, "#1f2937"),
+                                shadow=ft.BoxShadow(
+                                    blur_radius=12,
+                                    spread_radius=1,
+                                    color=ft.Colors.with_opacity(0.20, "#000000"),
+                                    offset=ft.Offset(0, 4),
+                                ),
+                                content=ft.Column(ref=virtual_keyboard_body, spacing=4, tight=True),
+                            )
+                        ],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                )
+            ],
+            expand=True,
+        )
+    )
 
     def on_window_event(ev: ft.WindowEvent):
         if ev.type != ft.WindowEventType.CLOSE:
@@ -780,7 +1173,7 @@ def main(page: ft.Page):
             return data
         return None
 
-    def _apply_cart_from_response(data: Any) -> bool:
+    def _apply_cart_from_response(data: Any, *, flush: bool = True) -> bool:
         cart = _cart_from_patch_response(data)
         if not cart:
             return False
@@ -788,10 +1181,10 @@ def main(page: ft.Page):
         sid = _shift_id_from_cart(cart)
         if sid:
             session["active_shift_id"] = sid
-        render_cart_items()
+        render_cart_items(flush=flush)
         return True
 
-    async def _reload_cart_async() -> None:
+    async def _reload_cart_async(*, flush: bool = True) -> None:
         cid = session.get("cart_id")
         if not cid:
             return
@@ -808,7 +1201,7 @@ def main(page: ft.Page):
             local_products_cache.ingest_cart(client.active_branch_id, cart)
         except Exception:
             pass
-        render_cart_items()
+        render_cart_items(flush=flush)
 
     def on_print_weight_click(_):
         mgr = scale_state.get("mgr")
@@ -961,48 +1354,68 @@ def main(page: ft.Page):
             }
 
             async def _save_line():
-                set_loading(True)
+                set_loading(True, flush=False)
                 try:
                     resp = await asyncio.to_thread(client.pos_cart_item_patch, cid, item_id, body)
+                    hide_virtual_keyboard()
                     page.dialog.open = False
-                    page.update()
-                    if not _apply_cart_from_response(resp):
-                        await _reload_cart_async()
-                    snack("Позиция обновлена", ft.Colors.GREEN_700)
+                    if not _apply_cart_from_response(resp, flush=False):
+                        await _reload_cart_async(flush=False)
                 except ApiError as ex:
+                    set_loading(False, flush=False)
                     snack(str(ex), ft.Colors.RED_700)
-                finally:
-                    set_loading(False)
+                    return
+                set_loading(False, flush=False)
+                snack("Позиция обновлена", ft.Colors.GREEN_700)
 
             page.run_task(_save_line)
 
         def _cancel(_e):
+            hide_virtual_keyboard()
             page.dialog.open = False
             page.update()
 
         dval = item.get("discount_total")
         if dval is None:
             dval = item.get("line_discount")
-        tf_qty = ft.TextField(
-            label="Количество",
-            value=str(item.get("quantity", "1")),
-            dense=True,
-            width=280,
-            on_submit=_save,
+        tf_qty = bind_virtual_keyboard(
+            ft.TextField(
+                label="Количество",
+                value=str(item.get("quantity", "1")),
+                dense=True,
+                width=280,
+                on_submit=_save,
+            ),
+            mode="numeric",
+            title="Количество",
+            submit=_save,
+            submit_text="Сохранить",
         )
-        tf_price = ft.TextField(
-            label="Цена за ед. (базовая)",
-            value=_money(item.get("unit_price")),
-            dense=True,
-            width=280,
-            on_submit=_save,
+        tf_price = bind_virtual_keyboard(
+            ft.TextField(
+                label="Цена за ед. (базовая)",
+                value=_money(item.get("unit_price")),
+                dense=True,
+                width=280,
+                on_submit=_save,
+            ),
+            mode="numeric",
+            title="Цена",
+            submit=_save,
+            submit_text="Сохранить",
         )
-        tf_disc = ft.TextField(
-            label="Скидка на строку (сом, всего на позицию)",
-            value=_money(dval) if dval not in (None, "") else "0.00",
-            dense=True,
-            width=280,
-            on_submit=_save,
+        tf_disc = bind_virtual_keyboard(
+            ft.TextField(
+                label="Скидка на строку (сом, всего на позицию)",
+                value=_money(dval) if dval not in (None, "") else "0.00",
+                dense=True,
+                width=280,
+                on_submit=_save,
+            ),
+            mode="numeric",
+            title="Скидка по строке",
+            submit=_save,
+            submit_text="Сохранить",
         )
 
         dlg = ft.AlertDialog(
@@ -1028,7 +1441,7 @@ def main(page: ft.Page):
         dlg.open = True
         page.update()
 
-    def set_shift_banner(needs: bool, detail: str = ""):
+    def set_shift_banner(needs: bool, detail: str = "", *, flush: bool = True):
         session["needs_shift"] = needs
         if shift_banner.current:
             shift_banner.current.visible = needs
@@ -1039,9 +1452,10 @@ def main(page: ft.Page):
                     tx = row.controls[1]
                     if isinstance(tx, ft.Text):
                         tx.value = detail or "Смена не открыта. Откройте смену на кассе, затем начните продажу."
-        page.update()
+        if flush:
+            page.update()
 
-    def render_cart_items():
+    def render_cart_items(*, flush: bool = True):
         col = cart_items_col.current
         if not col:
             return
@@ -1123,7 +1537,7 @@ def main(page: ft.Page):
                         return
 
                     async def _qty_async():
-                        set_loading(True)
+                        set_loading(True, flush=False)
                         try:
                             resp = await asyncio.to_thread(
                                 client.pos_cart_item_patch,
@@ -1131,8 +1545,8 @@ def main(page: ft.Page):
                                 item_id,
                                 {"quantity": str(q)},
                             )
-                            if not _apply_cart_from_response(resp):
-                                await _reload_cart_async()
+                            if not _apply_cart_from_response(resp, flush=False):
+                                await _reload_cart_async(flush=False)
                         except ApiError as ex:
                             snack(str(ex), ft.Colors.RED_700)
                         finally:
@@ -1145,10 +1559,10 @@ def main(page: ft.Page):
                         return
 
                     async def _del_async():
-                        set_loading(True)
+                        set_loading(True, flush=False)
                         try:
                             await asyncio.to_thread(client.pos_cart_item_delete, cid, item_id)
-                            await _reload_cart_async()
+                            await _reload_cart_async(flush=False)
                         except ApiError as ex:
                             snack(str(ex), ft.Colors.RED_700)
                         finally:
@@ -1242,15 +1656,16 @@ def main(page: ft.Page):
             cid = session.get("cart_id")
             status_chip.current.value = f"Корзина: {str(cid)[:8]}…" if cid else "Нет активной корзины"
         sync_order_discount_fields()
-        page.update()
+        if flush:
+            page.update()
 
     def reload_cart():
         page.run_task(_reload_cart_async)
 
     def try_start_sale():
         async def _start():
-            set_loading(True)
-            set_shift_banner(False)
+            set_loading(True, flush=False)
+            set_shift_banner(False, flush=False)
             try:
                 cb = session.get("pos_cashbox_id")
                 if not (cb and str(cb).strip()):
@@ -1272,9 +1687,10 @@ def main(page: ft.Page):
                     local_products_cache.ingest_cart(client.active_branch_id, cart)
                 except Exception:
                     pass
-                set_shift_banner(False)
-                render_cart_items()
-                show_error("")
+                set_shift_banner(False, flush=False)
+                render_cart_items(flush=False)
+                show_error("", flush=False)
+                set_loading(False, flush=False)
                 snack("Продажа начата", ft.Colors.GREEN_700)
             except ApiError as ex:
                 pl = ex.payload
@@ -1282,20 +1698,22 @@ def main(page: ft.Page):
                 if isinstance(pl, dict):
                     detail = str(pl.get("detail") or "")
                 if ex.status_code == 400 and ("Смена не открыта" in detail or "смена" in detail.lower()):
-                    set_shift_banner(True, detail)
+                    set_shift_banner(True, detail, flush=False)
                     session["cart_id"] = None
                     session["cart"] = {}
                     session["active_shift_id"] = None
-                    render_cart_items()
+                    render_cart_items(flush=False)
+                    set_loading(False, flush=False)
+                    page.update()
                 else:
                     snack(str(ex), ft.Colors.RED_700)
             finally:
-                set_loading(False)
+                set_loading(False, flush=False)
 
         page.run_task(_start)
 
     def process_scan_code(code: str):
-        show_error("")
+        show_error("", flush=False)
         code, bc_err = normalize_barcode_for_scan(code)
         if bc_err:
             show_error(bc_err)
@@ -1306,10 +1724,7 @@ def main(page: ft.Page):
             return
         # Отменить отложенный живой поиск и очистить поле — меньше лишних запросов и гонок с API.
         session["search_gen"] = session.get("search_gen", 0) + 1
-        if search_field_ref.current:
-            search_field_ref.current.value = ""
-        clear_search_results()
-        page.update()
+        reset_search_panel(flush=True)
         session["scan_seq"] = int(session.get("scan_seq") or 0) + 1
         seq = session["scan_seq"]
         cid_s = str(cid)
@@ -1346,7 +1761,6 @@ def main(page: ft.Page):
             except Exception:
                 pass
             render_cart_items()
-            page.update()
 
         page.run_task(_scan_task)
 
@@ -1376,10 +1790,26 @@ def main(page: ft.Page):
         session["barcode_buf"] = nb
         session["barcode_last_ms"] = now_ms
 
-    def clear_search_results():
+    def clear_search_results() -> bool:
         col = search_results_ref.current
         if col:
+            if not col.controls:
+                return False
             col.controls.clear()
+            return True
+        return False
+
+    def reset_search_panel(*, show_quick_catalog: bool = False, flush: bool = True) -> None:
+        changed = False
+        if search_field_ref.current and (search_field_ref.current.value or ""):
+            search_field_ref.current.value = ""
+            changed = True
+        if show_quick_catalog:
+            _render_quick_catalog(flush=flush)
+            return
+        changed = clear_search_results() or changed
+        if changed and flush:
+            page.update()
 
     def add_product_by_id(product_id: str, quantity: str | None = None):
         err = validate_product_id(product_id)
@@ -1392,25 +1822,23 @@ def main(page: ft.Page):
             return
 
         async def _add():
-            set_loading(True)
+            set_loading(True, flush=False)
             try:
                 q = (quantity or "").strip()
                 if q:
                     resp = await asyncio.to_thread(client.pos_add_item, cid, product_id, q)
                 else:
                     resp = await asyncio.to_thread(client.pos_add_item, cid, product_id)
-                if not _apply_cart_from_response(resp):
-                    await _reload_cart_async()
+                if not _apply_cart_from_response(resp, flush=False):
+                    await _reload_cart_async(flush=False)
                 try:
                     local_products_cache.ingest_cart(
                         client.active_branch_id, session.get("cart") or {}
                     )
                 except Exception:
                     pass
-                if search_field_ref.current:
-                    search_field_ref.current.value = ""
-                clear_search_results()
-                show_error("")
+                reset_search_panel(show_quick_catalog=True, flush=False)
+                show_error("", flush=False)
             except ApiError as ex:
                 snack(str(ex), ft.Colors.RED_700)
             finally:
@@ -1439,8 +1867,7 @@ def main(page: ft.Page):
                 initial = f"{w:.3f}".rstrip("0").rstrip(".") or str(w)
 
         def close_dlg():
-            page.pop_dialog()
-            page.update()
+            dismiss_dialog()
 
         def do_weighed_add(_e=None):
             err = validate_quantity(tf_q.value)
@@ -1464,13 +1891,19 @@ def main(page: ft.Page):
             tf_q.value = s if s else str(w)
             page.update()
 
-        tf_q = ft.TextField(
-            label="Вес, кг",
-            value=initial,
-            hint_text="Введите вручную или «С весов»",
-            dense=True,
-            autofocus=True,
-            on_submit=do_weighed_add,
+        tf_q = bind_virtual_keyboard(
+            ft.TextField(
+                label="Вес, кг",
+                value=initial,
+                hint_text="Введите вручную или «С весов»",
+                dense=True,
+                autofocus=True,
+                on_submit=do_weighed_add,
+            ),
+            mode="numeric",
+            title="Вес товара",
+            submit=do_weighed_add,
+            submit_text="В чек",
         )
 
         dlg = ft.AlertDialog(
@@ -1520,6 +1953,316 @@ def main(page: ft.Page):
         else:
             add_product_by_id(str(p.get("id")))
 
+    def _quick_catalog_matches_tab(p: dict[str, Any], tab: str) -> bool:
+        return _product_must_weigh(p) if tab == "kg" else not _product_must_weigh(p)
+
+    def _quick_catalog_name(p: dict[str, Any]) -> str:
+        return str(p.get("name") or p.get("title") or f"Товар #{p.get('id') or '—'}").strip()
+
+    def _quick_catalog_norm(text: Any) -> str:
+        return str(text or "").strip().lower().replace("ё", "е")
+
+    def _quick_catalog_score(p: dict[str, Any], tab: str) -> tuple[int, float, str]:
+        name = _quick_catalog_norm(_quick_catalog_name(p))
+        boost = 0
+        if tab == "kg":
+            boost += 3000
+        for needle, score in QUICK_CATALOG_PRIORITY.get(tab, ()):
+            if needle in name:
+                boost = max(boost, score)
+        try:
+            updated = float(p.get("updated_at") or 0.0)
+        except (TypeError, ValueError):
+            updated = 0.0
+        return boost, updated, name
+
+    def _sort_quick_catalog_products(
+        products: list,
+        tab: str,
+        limit: int = QUICK_CATALOG_LIMIT,
+    ) -> list[dict[str, Any]]:
+        uniq: dict[str, dict[str, Any]] = {}
+        for raw in products:
+            if not isinstance(raw, dict) or not _quick_catalog_matches_tab(raw, tab):
+                continue
+            pid = raw.get("id")
+            pid_s = str(pid).strip() if pid is not None else ""
+            if not pid_s:
+                continue
+            item = dict(raw)
+            item["id"] = pid_s
+            item["name"] = _quick_catalog_name(item) or f"Товар #{pid_s}"
+            prev = uniq.get(pid_s)
+            if prev is None or _quick_catalog_score(item, tab) > _quick_catalog_score(prev, tab):
+                uniq[pid_s] = item
+        ordered = sorted(
+            uniq.values(),
+            key=lambda p: (
+                -_quick_catalog_score(p, tab)[0],
+                -_quick_catalog_score(p, tab)[1],
+                _quick_catalog_score(p, tab)[2],
+            ),
+        )
+        return ordered[: max(1, int(limit))]
+
+    def _quick_catalog_match_score(
+        spec: tuple[str, tuple[str, ...]],
+        p: dict[str, Any],
+        tab: str,
+    ) -> int:
+        if not _quick_catalog_matches_tab(p, tab):
+            return -1
+        name = _quick_catalog_norm(_quick_catalog_name(p))
+        best = -1
+        for alias in spec[1]:
+            alias_n = _quick_catalog_norm(alias)
+            if not alias_n:
+                continue
+            if name == alias_n:
+                best = max(best, 6000)
+            elif name.startswith(alias_n):
+                best = max(best, 5200)
+            elif alias_n in name:
+                best = max(best, 4300)
+        return best
+
+    def _pick_quick_catalog_match(
+        spec: tuple[str, tuple[str, ...]],
+        pool: list[dict[str, Any]],
+        tab: str,
+    ) -> dict[str, Any] | None:
+        best_item: dict[str, Any] | None = None
+        best_score = -1
+        for p in pool:
+            score = _quick_catalog_match_score(spec, p, tab)
+            if score > best_score:
+                best_item = p
+                best_score = score
+        return dict(best_item) if best_item is not None and best_score >= 0 else None
+
+    def _build_search_product_card(p: dict[str, Any]) -> ft.Control:
+        title = str(p.get("name") or p.get("title") or "—")
+        price = _money(p.get("price"))
+        must_weigh = _product_must_weigh(p)
+        sub_price = f"{price} сом/кг" if must_weigh else f"{price} сом"
+        badge_text = "кг" if must_weigh else "шт"
+
+        def on_pick(e, row=p):
+            pick_product_from_search(row)
+
+        return ft.GestureDetector(
+            on_tap=on_pick,
+            content=ft.Container(
+                expand=True,
+                height=92,
+                padding=ft.Padding.symmetric(horizontal=8, vertical=8),
+                bgcolor=UI_SURFACE,
+                border_radius=12,
+                border=ft.Border.all(1, UI_BORDER),
+                content=ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Container(
+                                    content=ft.Text(
+                                        badge_text,
+                                        size=9,
+                                        color=UI_TEXT,
+                                        weight=ft.FontWeight.W_600,
+                                    ),
+                                    bgcolor=UI_ICON_BADGE_BG,
+                                    border_radius=999,
+                                    padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                                ),
+                                ft.Container(expand=True),
+                                ft.Icon(
+                                    ft.Icons.SCALE_OUTLINED if must_weigh else ft.Icons.SHOPPING_BAG_OUTLINED,
+                                    size=14,
+                                    color=UI_ACCENT_DIM,
+                                ),
+                            ],
+                            spacing=4,
+                        ),
+                        ft.Text(
+                            title,
+                            size=11,
+                            color=UI_TEXT,
+                            weight=ft.FontWeight.W_600,
+                            max_lines=3,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                        ft.Container(expand=True),
+                        ft.Text(
+                            sub_price,
+                            size=10,
+                            color=UI_ACCENT,
+                            weight=ft.FontWeight.W_500,
+                            max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                    ],
+                    spacing=4,
+                    expand=True,
+                ),
+            ),
+        )
+
+    def _append_products_grid(col: ft.Column, products: list[dict[str, Any]]) -> None:
+        chunk: list[dict[str, Any]] = []
+        for p in products:
+            if not isinstance(p, dict):
+                continue
+            chunk.append(p)
+            if len(chunk) >= PRODUCT_GRID_COLUMNS:
+                row_controls: list[ft.Control] = [
+                    ft.Container(content=_build_search_product_card(item), expand=1)
+                    for item in chunk
+                ]
+                col.controls.append(ft.Row(row_controls, spacing=6))
+                chunk = []
+        if chunk:
+            row_controls = [
+                ft.Container(content=_build_search_product_card(item), expand=1)
+                for item in chunk
+            ]
+            while len(row_controls) < PRODUCT_GRID_COLUMNS:
+                row_controls.append(ft.Container(expand=1))
+            col.controls.append(ft.Row(row_controls, spacing=6))
+
+    def _render_quick_catalog(
+        products: list | None = None,
+        tab: str | None = None,
+        *,
+        flush: bool = True,
+    ) -> None:
+        col = search_results_ref.current
+        if not col:
+            return
+        active_tab = str(tab or session.get("quick_catalog_tab") or "kg")
+        all_products = session.get("quick_catalog_products") or {}
+        items = products if products is not None else (all_products.get(active_tab) or [])
+        col.controls.clear()
+        if not items:
+            loading = bool((session.get("quick_catalog_loading") or {}).get(active_tab))
+            hint = "Загружаю товары..." if loading else "Быстрые товары ещё не загружены."
+            col.controls.append(
+                ft.Container(
+                    content=ft.Text(hint, color=UI_MUTED, size=12),
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=8),
+                )
+            )
+            if flush:
+                page.update()
+            return
+        _append_products_grid(col, items)
+        if flush:
+            page.update()
+
+    async def _load_quick_catalog(tab: str, force_remote: bool = False) -> None:
+        products_map = session.get("quick_catalog_products") or {"kg": [], "common": []}
+        loading_map = session.get("quick_catalog_loading") or {"kg": False, "common": False}
+        loaded_map = session.get("quick_catalog_loaded") or {"kg": False, "common": False}
+        if loading_map.get(tab):
+            return
+        if loaded_map.get(tab) and products_map.get(tab) and not force_remote:
+            q_now = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+            if len(q_now) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
+                _render_quick_catalog()
+            return
+
+        loading_map[tab] = True
+        q_before = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+        if len(q_before) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
+            _render_quick_catalog(products_map.get(tab) or [], tab)
+
+        cache_pool = [
+            dict(p)
+            for p in local_products_cache.get_cached_products(
+                client.active_branch_id,
+                kg_only=False,
+                limit=QUICK_CATALOG_LIMIT * 8,
+            )
+            if isinstance(p, dict)
+        ]
+        cache_pool = [p for p in cache_pool if _quick_catalog_matches_tab(p, tab)]
+
+        presets = QUICK_CATALOG_PRESETS.get(tab, ())
+        resolved: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        unresolved: list[tuple[str, tuple[str, ...]]] = []
+
+        for spec in presets:
+            found = _pick_quick_catalog_match(spec, cache_pool, tab)
+            if found:
+                pid = str(found.get("id") or "").strip()
+                if pid and pid not in seen_ids:
+                    resolved.append(found)
+                    seen_ids.add(pid)
+            else:
+                unresolved.append(spec)
+
+        merged_pool: list[dict[str, Any]] = list(cache_pool)
+        try:
+            for spec in unresolved:
+                found: dict[str, Any] | None = None
+                for query in spec[1]:
+                    try:
+                        rows = await asyncio.to_thread(client.products_search, query, 20)
+                    except ApiError:
+                        continue
+                    ready_rows = [
+                        dict(p)
+                        for p in rows
+                        if isinstance(p, dict) and p.get("id") and _quick_catalog_matches_tab(p, tab)
+                    ]
+                    if not ready_rows:
+                        continue
+                    merged_pool.extend(ready_rows)
+                    try:
+                        local_products_cache.ingest_product_list(client.active_branch_id, ready_rows)
+                    except Exception:
+                        pass
+                    found = _pick_quick_catalog_match(spec, ready_rows + merged_pool, tab)
+                    if found:
+                        break
+                if found:
+                    pid = str(found.get("id") or "").strip()
+                    if pid and pid not in seen_ids:
+                        resolved.append(found)
+                        seen_ids.add(pid)
+
+            if len(resolved) < QUICK_CATALOG_LIMIT:
+                try:
+                    catalog_rows = await asyncio.to_thread(
+                        client.products_catalog,
+                        QUICK_CATALOG_LIMIT * 6,
+                        8,
+                    )
+                except ApiError:
+                    catalog_rows = []
+                ready_catalog = [
+                    dict(p)
+                    for p in catalog_rows
+                    if isinstance(p, dict) and p.get("id") and _quick_catalog_matches_tab(p, tab)
+                ]
+                if ready_catalog:
+                    merged_pool.extend(ready_catalog)
+                    try:
+                        local_products_cache.ingest_product_list(client.active_branch_id, ready_catalog)
+                    except Exception:
+                        pass
+
+            remainder = _sort_quick_catalog_products(merged_pool, tab, QUICK_CATALOG_LIMIT * 3)
+            final = resolved + [p for p in remainder if str(p.get("id") or "").strip() not in seen_ids]
+            products_map[tab] = final[:QUICK_CATALOG_LIMIT]
+            loaded_map[tab] = True
+
+            q_after = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+            if len(q_after) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
+                _render_quick_catalog(products_map.get(tab) or [], tab)
+        finally:
+            loading_map[tab] = False
+
     def _fill_search_results(products: list):
         col = search_results_ref.current
         if not col:
@@ -1528,56 +2271,25 @@ def main(page: ft.Page):
         if not products:
             col.controls.append(ft.Text("Ничего не найдено", color=UI_MUTED, size=13))
             return
-        for p in products:
-            if not isinstance(p, dict):
-                continue
-            pid = p.get("id")
-            if not pid:
-                continue
-            pid_s = str(pid)
-            title = str(p.get("name") or "—")
-            price = _money(p.get("price"))
-            must_weigh = _product_must_weigh(p)
-            sub_price = f"{price} сом за кг · на вес" if must_weigh else f"{price} сом"
-
-            def on_pick(e, row=p):
-                pick_product_from_search(row)
-
-            col.controls.append(
-                ft.ListTile(
-                    title=ft.Text(
-                        title,
-                        size=13,
-                        color=UI_TEXT,
-                        max_lines=2,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                    ),
-                    subtitle=ft.Text(
-                        sub_price,
-                        size=12,
-                        color=UI_ACCENT,
-                        weight=ft.FontWeight.W_500,
-                        max_lines=2,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                    ),
-                    dense=True,
-                    on_click=on_pick,
-                    hover_color=ft.Colors.with_opacity(0.06, "#111827"),
-                )
-            )
+        valid_products = [
+            p for p in products if isinstance(p, dict) and p.get("id")
+        ]
+        _append_products_grid(col, valid_products)
 
     def _do_search(q: str, silent: bool = False):
         q = (q or "").strip()
         if not silent:
-            show_error("")
+            show_error("", flush=False)
         if len(q) < 2:
-            clear_search_results()
+            _render_quick_catalog(flush=not silent)
             if not silent:
-                show_error("Введите минимум 2 символа для поиска по названию")
+                if q:
+                    show_error("Введите минимум 2 символа для поиска по названию")
+                else:
+                    show_error("")
             else:
-                # Живой поиск: не дёргаем подсказку на каждый символ
-                show_error("")
-            page.update()
+                show_error("", flush=False)
+                page.update()
             return
         qerr = validate_search_query(q)
         if qerr:
@@ -1628,6 +2340,12 @@ def main(page: ft.Page):
 
     def on_search_change(_):
         q = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+        if not q:
+            session["search_gen"] = session.get("search_gen", 0) + 1
+            active_tab = str(session.get("quick_catalog_tab") or "kg")
+            _render_quick_catalog(flush=True)
+            page.run_task(_load_quick_catalog, active_tab, False)
+            return
         if _looks_like_barcode_query(q):
             return
         session["search_gen"] = session.get("search_gen", 0) + 1
@@ -1640,6 +2358,14 @@ def main(page: ft.Page):
             page.update()
             return
         _do_search(q, silent=False)
+
+    def on_quick_catalog_tab_change(e):
+        selected = e.control.selected[0] if getattr(e.control, "selected", None) else "kg"
+        session["quick_catalog_tab"] = selected
+        q = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+        if len(q) < 2:
+            _render_quick_catalog(tab=selected)
+            page.run_task(_load_quick_catalog, selected, False)
 
     def open_shift_dlg(_):
         async def _load_and_show():
@@ -1670,7 +2396,12 @@ def main(page: ft.Page):
             if pref and str(pref) in keys_ok:
                 default_cashbox = str(pref)
 
-            manual = ft.TextField(label="ID кассы", visible=not dd_options, dense=True, expand=True)
+            manual = bind_virtual_keyboard(
+                ft.TextField(label="ID кассы", visible=not dd_options, dense=True, expand=True),
+                mode="english",
+                title="ID кассы",
+                submit_text="Готово",
+            )
             dd = ft.Dropdown(
                 label="Касса",
                 options=dd_options,
@@ -1678,7 +2409,13 @@ def main(page: ft.Page):
                 visible=bool(dd_options),
                 expand=True,
             )
-            opening = ft.TextField(label="Начальная сумма", value="0.00", dense=True)
+            opening = bind_virtual_keyboard(
+                ft.TextField(label="Начальная сумма", value="0.00", dense=True),
+                mode="numeric",
+                title="Начальная сумма",
+                submit=lambda _e=None: do_open(None),
+                submit_text="Открыть",
+            )
 
             def do_open(_e):
                 box = (dd.value or "").strip() if dd.visible else ""
@@ -1708,8 +2445,7 @@ def main(page: ft.Page):
                         new_sid = _shift_id_from_open_response(res)
                         if new_sid:
                             session["active_shift_id"] = new_sid
-                        page.pop_dialog()
-                        page.update()
+                        dismiss_dialog()
                         snack("Смена открыта", ft.Colors.GREEN_700)
                         try_start_sale()
                     except ApiError as ex:
@@ -1730,7 +2466,7 @@ def main(page: ft.Page):
                     width=400,
                 ),
                 actions=[
-                    ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
+                    ft.TextButton("Отмена", on_click=dismiss_dialog),
                     ft.FilledButton(
                         "Открыть",
                         style=ft.ButtonStyle(bgcolor=UI_ACCENT, color=UI_TEXT_ON_YELLOW),
@@ -1758,7 +2494,13 @@ def main(page: ft.Page):
                     ft.Colors.AMBER_700,
                 )
                 return
-            closing = ft.TextField(label="Наличные при закрытии", value="0.00", dense=True)
+            closing = bind_virtual_keyboard(
+                ft.TextField(label="Наличные при закрытии", value="0.00", dense=True),
+                mode="numeric",
+                title="Наличные при закрытии",
+                submit=lambda _e=None: do_close(None),
+                submit_text="Закрыть",
+            )
 
             def do_close(_e):
                 cv, cerr = parse_decimal(
@@ -1772,8 +2514,7 @@ def main(page: ft.Page):
                     set_loading(True)
                     try:
                         await asyncio.to_thread(client.construction_shift_close, sid, _money(cv))
-                        page.pop_dialog()
-                        page.update()
+                        dismiss_dialog()
                         session["active_shift_id"] = None
                         session["cart_id"] = None
                         session["cart"] = {}
@@ -1793,7 +2534,7 @@ def main(page: ft.Page):
                 title=ft.Text("Закрыть смену", color=UI_TEXT, weight=ft.FontWeight.W_600),
                 content=closing,
                 actions=[
-                    ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
+                    ft.TextButton("Отмена", on_click=dismiss_dialog),
                     ft.FilledButton(
                         "Закрыть",
                         style=ft.ButtonStyle(bgcolor=UI_ACCENT, color=UI_TEXT_ON_YELLOW),
@@ -1824,17 +2565,23 @@ def main(page: ft.Page):
             or str(u_pay.get("email") or "—")
         )
 
-        cash_in = ft.TextField(
-            label="Получено наличными",
-            value=_money(tot_f),
-            hint_text="Не меньше суммы чека",
-            dense=True,
-            visible=True,
-            filled=True,
-            bgcolor=UI_SURFACE_ELEV,
-            border_radius=12,
-            color=UI_TEXT,
-            prefix_icon=ft.Icons.PAYMENTS_OUTLINED,
+        cash_in = bind_virtual_keyboard(
+            ft.TextField(
+                label="Получено наличными",
+                value=_money(tot_f),
+                hint_text="Не меньше суммы чека",
+                dense=True,
+                visible=True,
+                filled=True,
+                bgcolor=UI_SURFACE_ELEV,
+                border_radius=12,
+                color=UI_TEXT,
+                prefix_icon=ft.Icons.PAYMENTS_OUTLINED,
+            ),
+            mode="numeric",
+            title="Оплата наличными",
+            submit=lambda _e=None: do_pay(None),
+            submit_text="Оплатить",
         )
 
         pay_seg = ft.SegmentedButton(
@@ -1913,8 +2660,7 @@ def main(page: ft.Page):
                     set_loading(False)
                     page.update()
 
-                page.pop_dialog()
-                page.update()
+                dismiss_dialog()
                 ch = _checkout_change_amount(res)
                 sale_id = _checkout_sale_id(res)
                 msg = f"Оплата прошла. Сдача: {_money(ch)} сом" if ch is not None else "Оплата прошла"
@@ -1976,8 +2722,7 @@ def main(page: ft.Page):
             page.run_task(_checkout_async)
 
         def close_checkout_dlg(_e=None):
-            page.pop_dialog()
-            page.update()
+            dismiss_dialog()
 
         dlg = ft.AlertDialog(
             modal=True,
@@ -2121,31 +2866,42 @@ def main(page: ft.Page):
 
     def build_login() -> ft.Column:
         _login_field_fill = UI_SURFACE_ELEV
-        email = ft.TextField(
-            label="Email",
-            value=TEST_LOGIN_EMAIL,
-            hint_text="user@example.com",
-            keyboard_type=ft.KeyboardType.EMAIL,
-            autofocus=True,
-            border_radius=8,
-            filled=True,
-            border=ft.InputBorder.NONE,
-            bgcolor=_login_field_fill,
-            border_width=0,
-            expand=True,
+        email = bind_virtual_keyboard(
+            ft.TextField(
+                label="Email",
+                value=TEST_LOGIN_EMAIL,
+                hint_text="user@example.com",
+                keyboard_type=ft.KeyboardType.EMAIL,
+                autofocus=True,
+                border_radius=8,
+                filled=True,
+                border=ft.InputBorder.NONE,
+                bgcolor=_login_field_fill,
+                border_width=0,
+                expand=True,
+            ),
+            mode="email",
+            title="Email",
+            submit_text="Готово",
         )
-        password = ft.TextField(
-            label="Пароль",
-            value=TEST_LOGIN_PASSWORD,
-            password=True,
-            can_reveal_password=True,
-            border_radius=8,
-            filled=True,
-            border=ft.InputBorder.NONE,
-            bgcolor=_login_field_fill,
-            border_width=0,
-            expand=True,
-            on_submit=lambda e: do_login(None),
+        password = bind_virtual_keyboard(
+            ft.TextField(
+                label="Пароль",
+                value=TEST_LOGIN_PASSWORD,
+                password=True,
+                can_reveal_password=True,
+                border_radius=8,
+                filled=True,
+                border=ft.InputBorder.NONE,
+                bgcolor=_login_field_fill,
+                border_width=0,
+                expand=True,
+                on_submit=lambda e: do_login(None),
+            ),
+            mode="password",
+            title="Пароль",
+            submit=lambda _e=None: do_login(None),
+            submit_text="Войти",
         )
 
         def do_login(_):
@@ -2270,14 +3026,21 @@ def main(page: ft.Page):
         )
 
     def open_cashier():
+        hide_virtual_keyboard()
         session["cashier_active"] = True
         session["barcode_buf"] = ""
         session["barcode_last_ms"] = 0.0
+        session["quick_catalog_tab"] = "kg"
+        session["quick_catalog_products"] = {"kg": [], "common": []}
+        session["quick_catalog_loading"] = {"kg": False, "common": False}
+        session["quick_catalog_loaded"] = {"kg": False, "common": False}
         page.on_keyboard_event = on_global_keyboard
         page.controls.clear()
         page.add(build_cashier())
         page.window.prevent_close = True
         page.update()
+        _render_quick_catalog([], "kg")
+        page.run_task(_load_quick_catalog, "kg", True)
         if scale_feature_enabled:
             old = scale_state.get("mgr")
             if old is not None:
@@ -2296,6 +3059,7 @@ def main(page: ft.Page):
         try_start_sale()
 
     def logout(_):
+        hide_virtual_keyboard()
         mgr = scale_state.get("mgr")
         if mgr is not None:
             try:
@@ -2319,12 +3083,17 @@ def main(page: ft.Page):
 
     def open_printer_settings_dlg(_):
         cur = printer_config.as_dict()
-        tf_lpt = ft.TextField(
-            label="LPT-порт чека",
-            value=str(cur.get("file_path") or "LPT1"),
-            hint_text="Обычно LPT1 или LPT2",
-            dense=True,
-            width=420,
+        tf_lpt = bind_virtual_keyboard(
+            ft.TextField(
+                label="LPT-порт чека",
+                value=str(cur.get("file_path") or "LPT1"),
+                hint_text="Обычно LPT1 или LPT2",
+                dense=True,
+                width=420,
+            ),
+            mode="lpt",
+            title="LPT-порт чека",
+            submit_text="Готово",
         )
         dd_escpos_profile = ft.Dropdown(
             label="Модель / профиль ESC/POS",
@@ -2358,22 +3127,32 @@ def main(page: ft.Page):
                 return ""
             return str(v)
 
-        tf_escpos_table = ft.TextField(
-            label="Таблица ESC t (0–255)",
-            value=_opt_str(cur.get("escpos_table")),
-            hint_text=(
-                "Пусто: авто (CP866→17, WPC1251/CP1251→46). Указали число — уходит как есть "
-                "(на части Cashino+LPT читаемее CP866+46). Кракозябры — поменяйте пару кодировка/слот."
+        tf_escpos_table = bind_virtual_keyboard(
+            ft.TextField(
+                label="Таблица ESC t (0–255)",
+                value=_opt_str(cur.get("escpos_table")),
+                hint_text=(
+                    "Пусто: авто (CP866→17, WPC1251/CP1251→46). Указали число — уходит как есть "
+                    "(на части Cashino+LPT читаемее CP866+46). Кракозябры — поменяйте пару кодировка/слот."
+                ),
+                dense=True,
+                width=420,
             ),
-            dense=True,
-            width=420,
+            mode="numeric",
+            title="Таблица ESC t",
+            submit_text="Готово",
         )
-        tf_esc_r = ft.TextField(
-            label="ESC R международный набор (0–255)",
-            value=_opt_str(cur.get("esc_r")),
-            hint_text="Обычно пусто; редко 0 или 6",
-            dense=True,
-            width=420,
+        tf_esc_r = bind_virtual_keyboard(
+            ft.TextField(
+                label="ESC R международный набор (0–255)",
+                value=_opt_str(cur.get("esc_r")),
+                hint_text="Обычно пусто; редко 0 или 6",
+                dense=True,
+                width=420,
+            ),
+            mode="numeric",
+            title="ESC R",
+            submit_text="Готово",
         )
 
         def collect() -> dict[str, Any]:
@@ -2392,8 +3171,7 @@ def main(page: ft.Page):
         def do_save(_e):
             try:
                 printer_config.save(collect())
-                page.pop_dialog()
-                page.update()
+                dismiss_dialog()
                 snack("Настройки принтера сохранены", ft.Colors.GREEN_700)
             except OSError as ex:
                 snack(f"Не удалось записать файл: {ex}", ft.Colors.RED_700)
@@ -2458,7 +3236,7 @@ def main(page: ft.Page):
                 padding=ft.Padding.only(right=8),
             ),
             actions=[
-                ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
+                ft.TextButton("Отмена", on_click=dismiss_dialog),
                 ft.OutlinedButton(
                     "Самопроверка",
                     icon=ft.Icons.FACT_CHECK_OUTLINED,
@@ -2549,18 +3327,28 @@ def main(page: ft.Page):
             value=_val,
             options=_opts,
         )
-        tf_scale_baud = ft.TextField(
-            label="Скорость (бод)",
-            value=str(cur.get("scale_baud") or 9600),
-            dense=True,
-            width=200,
+        tf_scale_baud = bind_virtual_keyboard(
+            ft.TextField(
+                label="Скорость (бод)",
+                value=str(cur.get("scale_baud") or 9600),
+                dense=True,
+                width=200,
+            ),
+            mode="numeric",
+            title="Скорость весов",
+            submit_text="Готово",
         )
-        tf_scale_lpt = ft.TextField(
-            label="LPT для тестовой печати веса",
-            value=str(cur.get("scale_lpt") or "LPT1"),
-            hint_text="Обычно LPT1 на моноблоке",
-            dense=True,
-            width=420,
+        tf_scale_lpt = bind_virtual_keyboard(
+            ft.TextField(
+                label="LPT для тестовой печати веса",
+                value=str(cur.get("scale_lpt") or "LPT1"),
+                hint_text="Обычно LPT1 на моноблоке",
+                dense=True,
+                width=420,
+            ),
+            mode="lpt",
+            title="LPT для веса",
+            submit_text="Готово",
         )
 
         def refresh_ports(_e=None):
@@ -2580,8 +3368,7 @@ def main(page: ft.Page):
         def do_save(_e):
             try:
                 printer_config.save(collect_scale())
-                page.pop_dialog()
-                page.update()
+                dismiss_dialog()
                 restart_scale_manager()
                 snack("Настройки весов сохранены, COM переподключён", ft.Colors.GREEN_700)
             except OSError as ex:
@@ -2641,7 +3428,7 @@ def main(page: ft.Page):
                 padding=ft.Padding.only(right=8),
             ),
             actions=[
-                ft.TextButton("Отмена", on_click=lambda e: page.pop_dialog()),
+                ft.TextButton("Отмена", on_click=dismiss_dialog),
                 ft.FilledButton(
                     "Сохранить",
                     icon=ft.Icons.SAVE_OUTLINED,
@@ -2782,6 +3569,12 @@ def main(page: ft.Page):
 
             def on_branch(e):
                 client.active_branch_id = e.control.value
+                session["quick_catalog_products"] = {"kg": [], "common": []}
+                session["quick_catalog_loading"] = {"kg": False, "common": False}
+                session["quick_catalog_loaded"] = {"kg": False, "common": False}
+                active_tab = str(session.get("quick_catalog_tab") or "kg")
+                _render_quick_catalog([], active_tab)
+                page.run_task(_load_quick_catalog, active_tab, True)
                 try_start_sale()
 
             branch_ctrl = ft.Dropdown(
@@ -2825,16 +3618,22 @@ def main(page: ft.Page):
 
         search_row = ft.Row(
             [
-                ft.TextField(
-                    ref=search_field_ref,
-                    label="Поиск по названию",
-                    hint_text="Живой поиск от 2 символов",
-                    dense=True,
-                    expand=True,
-                    border_radius=10,
-                    filled=True,
-                    on_change=on_search_change,
-                    on_submit=on_search_submit,
+                bind_virtual_keyboard(
+                    ft.TextField(
+                        ref=search_field_ref,
+                        label="Поиск по названию",
+                        hint_text="Живой поиск от 2 символов",
+                        dense=True,
+                        expand=True,
+                        border_radius=10,
+                        filled=True,
+                        on_change=on_search_change,
+                        on_submit=on_search_submit,
+                    ),
+                    mode="text",
+                    title="Поиск товаров",
+                    submit=on_search_submit,
+                    submit_text="Найти",
                 ),
                 ft.IconButton(
                     ft.Icons.SEARCH,
@@ -2849,8 +3648,38 @@ def main(page: ft.Page):
 
         search_results = ft.Column(
             ref=search_results_ref,
-            spacing=0,
+            spacing=6,
             scroll=ft.ScrollMode.AUTO,
+        )
+
+        quick_catalog_tabs = ft.SegmentedButton(
+            segments=[
+                ft.Segment(
+                    value="kg",
+                    label=ft.Text("По кг", size=12),
+                    icon=ft.Icons.SCALE_OUTLINED,
+                ),
+                ft.Segment(
+                    value="common",
+                    label=ft.Text("Обычные", size=12),
+                    icon=ft.Icons.GRID_VIEW_OUTLINED,
+                ),
+            ],
+            selected=[str(session.get("quick_catalog_tab") or "kg")],
+            show_selected_icon=False,
+            style=ft.ButtonStyle(
+                color={
+                    ft.ControlState.DEFAULT: UI_TEXT,
+                    ft.ControlState.SELECTED: UI_TEXT_ON_YELLOW,
+                },
+                bgcolor={
+                    ft.ControlState.DEFAULT: UI_SURFACE_ELEV,
+                    ft.ControlState.SELECTED: UI_ACCENT,
+                },
+                side=ft.BorderSide(1, UI_BORDER),
+                shape=ft.RoundedRectangleBorder(radius=10),
+            ),
+            on_change=on_quick_catalog_tab_change,
         )
 
         scan_block = ft.Column(
@@ -2869,6 +3698,7 @@ def main(page: ft.Page):
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
                 search_row,
+                quick_catalog_tabs,
             ],
             spacing=8,
         )
@@ -2941,21 +3771,33 @@ def main(page: ft.Page):
                     ft.Text("% или сумма", size=9, color=UI_MUTED),
                     ft.Row(
                         [
-                            ft.TextField(
-                                ref=order_discount_pct_ref,
-                                label="%",
-                                hint_text="10",
-                                dense=True,
-                                expand=True,
-                                on_submit=apply_order_discount,
+                            bind_virtual_keyboard(
+                                ft.TextField(
+                                    ref=order_discount_pct_ref,
+                                    label="%",
+                                    hint_text="10",
+                                    dense=True,
+                                    expand=True,
+                                    on_submit=apply_order_discount,
+                                ),
+                                mode="numeric",
+                                title="Скидка в процентах",
+                                submit=apply_order_discount,
+                                submit_text="Применить",
                             ),
-                            ft.TextField(
-                                ref=order_discount_sum_ref,
-                                label="Сумма",
-                                hint_text="50",
-                                dense=True,
-                                expand=True,
-                                on_submit=apply_order_discount,
+                            bind_virtual_keyboard(
+                                ft.TextField(
+                                    ref=order_discount_sum_ref,
+                                    label="Сумма",
+                                    hint_text="50",
+                                    dense=True,
+                                    expand=True,
+                                    on_submit=apply_order_discount,
+                                ),
+                                mode="numeric",
+                                title="Скидка суммой",
+                                submit=apply_order_discount,
+                                submit_text="Применить",
                             ),
                         ],
                         spacing=6,
@@ -3285,6 +4127,7 @@ def main(page: ft.Page):
         )
 
     def _on_page_disconnect(_):
+        hide_virtual_keyboard()
         mgr = scale_state.get("mgr")
         if mgr is not None:
             try:

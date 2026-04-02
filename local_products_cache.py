@@ -16,6 +16,7 @@ from typing import Any
 
 
 _lock = threading.Lock()
+_schema_ready = False
 
 
 def _enabled() -> bool:
@@ -59,6 +60,14 @@ def _init_schema(c: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_schema(c: sqlite3.Connection) -> None:
+    global _schema_ready
+    if _schema_ready:
+        return
+    _init_schema(c)
+    _schema_ready = True
+
+
 def init_db() -> None:
     if not _enabled():
         return
@@ -68,7 +77,7 @@ def init_db() -> None:
     with _lock:
         c = _connect()
         try:
-            _init_schema(c)
+            _ensure_schema(c)
         finally:
             c.close()
 
@@ -134,6 +143,22 @@ def _product_unit(p: dict[str, Any]) -> str | None:
     return None
 
 
+def _unit_is_kg_value(unit: Any) -> bool:
+    if unit is None:
+        return False
+    raw = str(unit).strip().lower()
+    if not raw:
+        return False
+    compact = raw.replace(" ", "").replace(".", "")
+    if compact in ("кг", "kg", "kг", "kilogram", "kilograms"):
+        return True
+    if "килограм" in raw:
+        return True
+    if compact.endswith("кг") or raw.endswith(" kg"):
+        return True
+    return False
+
+
 def upsert_row(
     branch_id: str | None,
     barcode: str,
@@ -153,7 +178,7 @@ def upsert_row(
     with _lock:
         c = _connect()
         try:
-            _init_schema(c)
+            _ensure_schema(c)
             c.execute(
                 """
                 INSERT INTO products (branch_id, barcode, product_id, name, price, unit, updated_at)
@@ -187,7 +212,7 @@ def get_cached_scan_row(branch_id: str | None, barcode: str) -> dict[str, Any] |
     with _lock:
         c = _connect()
         try:
-            _init_schema(c)
+            _ensure_schema(c)
             row = c.execute(
                 "SELECT product_id, unit FROM products WHERE branch_id = ? AND barcode = ?",
                 (bk, bc),
@@ -204,6 +229,63 @@ def get_cached_scan_row(branch_id: str | None, barcode: str) -> dict[str, Any] |
             return None
         finally:
             c.close()
+
+
+def get_cached_products(
+    branch_id: str | None,
+    *,
+    kg_only: bool = False,
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    if not _enabled():
+        return []
+    bk = _branch_key(branch_id)
+    with _lock:
+        c = _connect()
+        try:
+            _ensure_schema(c)
+            rows = c.execute(
+                """
+                SELECT product_id, name, price, unit, updated_at
+                FROM products
+                WHERE branch_id = ?
+                ORDER BY updated_at DESC
+                """,
+                (bk,),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        finally:
+            c.close()
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        pid = row["product_id"]
+        pid_s = str(pid).strip() if pid is not None else ""
+        if not pid_s or pid_s in seen:
+            continue
+        unit = row["unit"]
+        unit_s = str(unit).strip() if unit is not None and str(unit).strip() else None
+        is_kg = _unit_is_kg_value(unit_s)
+        if kg_only and not is_kg:
+            continue
+        seen.add(pid_s)
+        name = row["name"]
+        price = row["price"]
+        out.append(
+            {
+                "id": pid_s,
+                "name": str(name).strip() if name is not None and str(name).strip() else f"Товар #{pid_s}",
+                "price": str(price).strip() if price is not None and str(price).strip() else "",
+                "unit": unit_s,
+                "is_weight": is_kg,
+                "updated_at": row["updated_at"],
+            }
+        )
+        if len(out) >= max(1, int(limit)):
+            break
+    return out
 
 
 def ingest_product_dict(branch_id: str | None, p: dict[str, Any], barcode_hint: str | None = None) -> None:
@@ -243,7 +325,7 @@ def ingest_product_list(branch_id: str | None, products: list) -> None:
     with _lock:
         c = _connect()
         try:
-            _init_schema(c)
+            _ensure_schema(c)
             c.executemany(
                 """
                 INSERT INTO products (branch_id, barcode, product_id, name, price, unit, updated_at)
@@ -314,7 +396,7 @@ def ingest_cart(branch_id: str | None, cart: dict[str, Any]) -> None:
     with _lock:
         c = _connect()
         try:
-            _init_schema(c)
+            _ensure_schema(c)
             c.executemany(
                 """
                 INSERT INTO products (branch_id, barcode, product_id, name, price, unit, updated_at)
@@ -347,7 +429,7 @@ def clear_branch(branch_id: str | None) -> None:
     with _lock:
         c = _connect()
         try:
-            _init_schema(c)
+            _ensure_schema(c)
             c.execute("DELETE FROM products WHERE branch_id = ?", (bk,))
         finally:
             c.close()
@@ -359,7 +441,7 @@ def clear_all() -> None:
     with _lock:
         c = _connect()
         try:
-            _init_schema(c)
+            _ensure_schema(c)
             c.execute("DELETE FROM products")
         finally:
             c.close()

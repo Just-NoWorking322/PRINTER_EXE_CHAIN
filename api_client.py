@@ -433,3 +433,48 @@ class JwtClient:
         if last_err:
             raise last_err
         return []
+
+    def products_catalog(self, limit: int = 120, max_pages: int = 6) -> list:
+        """
+        Каталог товаров без поисковой строки.
+        Используется для быстрого блока слева, когда нужно показать больше позиций, чем даёт точечный search.
+        """
+        out: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        last_err: ApiError | None = None
+        candidates: tuple[str, ...] = (
+            "/api/main/products/list/",
+            "/api/main/products/",
+        )
+        for path in candidates:
+            out.clear()
+            seen_ids.clear()
+            try:
+                for page in range(1, max(1, int(max_pages)) + 1):
+                    data = self._request("GET", path, params={"page": page})
+                    items = unwrap_list(data)
+                    if not isinstance(items, list) or not items:
+                        break
+                    for p in items:
+                        if not isinstance(p, dict):
+                            continue
+                        pid = p.get("id")
+                        pid_s = str(pid).strip() if pid is not None else ""
+                        if not pid_s or pid_s in seen_ids:
+                            continue
+                        seen_ids.add(pid_s)
+                        out.append(p)
+                        if len(out) >= max(1, int(limit)):
+                            return out[:limit]
+                    if len(items) == 0:
+                        break
+                if out:
+                    return out[:limit]
+            except ApiError as e:
+                last_err = e
+                if e.status_code == 404:
+                    continue
+                raise
+        if last_err:
+            raise last_err
+        return out[:limit]
