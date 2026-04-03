@@ -71,6 +71,123 @@ def _init_kv_and_products(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_products_branch_pid ON products(branch_id, product_id)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS offline_session (
+            email TEXT PRIMARY KEY NOT NULL,
+            access_token TEXT,
+            refresh_token TEXT,
+            branch_id TEXT,
+            user_payload TEXT NOT NULL,
+            cashbox_id TEXT,
+            shift_id TEXT,
+            shift_open INTEGER NOT NULL DEFAULT 0,
+            saved_at REAL NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS offline_cart (
+            cart_id TEXT PRIMARY KEY NOT NULL,
+            email TEXT NOT NULL,
+            branch_id TEXT,
+            company TEXT,
+            cashier TEXT,
+            cashbox_id TEXT,
+            shift_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            order_discount_percent TEXT,
+            order_discount_total TEXT NOT NULL DEFAULT '0.00',
+            subtotal TEXT NOT NULL DEFAULT '0.00',
+            discount_total TEXT NOT NULL DEFAULT '0.00',
+            total TEXT NOT NULL DEFAULT '0.00',
+            sale_local_id TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            checked_out_at REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS offline_cart_items (
+            item_id TEXT PRIMARY KEY NOT NULL,
+            cart_id TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            barcode TEXT,
+            name TEXT NOT NULL,
+            unit TEXT,
+            is_weight INTEGER NOT NULL DEFAULT 0,
+            quantity TEXT NOT NULL,
+            unit_price TEXT NOT NULL,
+            discount_total TEXT NOT NULL DEFAULT '0.00',
+            line_total TEXT NOT NULL DEFAULT '0.00',
+            product_payload TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            FOREIGN KEY(cart_id) REFERENCES offline_cart(cart_id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_offline_cart_status ON offline_cart(status, updated_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_offline_cart_email_branch ON offline_cart(email, branch_id, status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_offline_cart_items_cart ON offline_cart_items(cart_id)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS offline_sales (
+            sale_local_id TEXT PRIMARY KEY NOT NULL,
+            cart_id TEXT NOT NULL,
+            email TEXT NOT NULL,
+            branch_id TEXT,
+            company TEXT,
+            cashier TEXT,
+            cashbox_id TEXT,
+            shift_id TEXT,
+            payment_method TEXT NOT NULL,
+            cash_received TEXT,
+            change_amount TEXT,
+            subtotal TEXT NOT NULL DEFAULT '0.00',
+            discount_total TEXT NOT NULL DEFAULT '0.00',
+            total TEXT NOT NULL DEFAULT '0.00',
+            order_discount_percent TEXT,
+            order_discount_total TEXT NOT NULL DEFAULT '0.00',
+            status TEXT NOT NULL DEFAULT 'pending_sync',
+            server_sale_id TEXT,
+            sale_payload TEXT NOT NULL,
+            last_error TEXT,
+            created_at REAL NOT NULL,
+            synced_at REAL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_offline_sales_status ON offline_sales(status, created_at)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_queue (
+            sale_local_id TEXT PRIMARY KEY NOT NULL,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            next_retry_at REAL NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            FOREIGN KEY(sale_local_id) REFERENCES offline_sales(sale_local_id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sync_queue_status_retry ON sync_queue(status, next_retry_at, updated_at)"
+    )
 
 
 def _migrate_legacy_json(conn: sqlite3.Connection) -> None:

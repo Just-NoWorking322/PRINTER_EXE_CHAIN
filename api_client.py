@@ -108,6 +108,22 @@ class JwtClient:
             self._session = requests.Session()
             self._configure_session(self._session)
 
+    def can_reach_api(self, timeout: float | tuple[float, float] = (2.0, 4.0)) -> bool:
+        probe_paths = (
+            "",
+            "/api/users/auth/login/",
+        )
+        for path in probe_paths:
+            url = f"{self.base_url}{path}"
+            try:
+                with self._http_lock:
+                    resp = self._session.get(url, timeout=timeout, allow_redirects=False)
+                if resp.status_code < 500:
+                    return True
+            except requests.exceptions.RequestException:
+                continue
+        return False
+
     def login(self, email: str, password: str) -> dict[str, Any]:
         url = f"{self.base_url}/api/users/auth/login/"
         with self._http_lock:
@@ -194,6 +210,35 @@ class JwtClient:
                 return r.json()
             except (json.JSONDecodeError, ValueError):
                 return {}
+
+    def fetch_authenticated_image(
+        self,
+        absolute_url: str,
+        *,
+        with_branch_params: bool = False,
+        timeout: tuple[float, float] = (6.0, 35.0),
+    ) -> tuple[bytes | None, str | None]:
+        """
+        GET картинки с Bearer (Flet Image по URL не подставляет JWT).
+        Возвращает тело ответа и content-type или (None, None).
+        """
+        if not self.access or not (absolute_url or "").strip():
+            return None, None
+        url = absolute_url.strip()
+        headers = {"Authorization": f"Bearer {self.access}"}
+        params = self.branch_params() if with_branch_params else None
+        try:
+            with self._http_lock:
+                r = self._session.get(url, headers=headers, params=params, timeout=timeout)
+        except requests.exceptions.RequestException:
+            return None, None
+        if r.status_code != 200 or len(r.content) < 24:
+            return None, None
+        head = r.content[:16].lstrip()
+        if head[:1] == b"<" or head[:4] == b"<!DO" or head[:7] == b"<!doct":
+            return None, None
+        ct = (r.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip() or "image/jpeg"
+        return r.content, ct
 
     # --- construction: смены и кассы ---
 
@@ -405,6 +450,33 @@ class JwtClient:
 
     def pos_product_by_barcode(self, barcode: str) -> dict[str, Any]:
         return self._request("GET", f"/api/main/products/barcode/{barcode}/")
+
+    def products_detail(self, product_id: str) -> dict[str, Any] | None:
+        """
+        Одна карточка товара (часто с заполненным images), тогда как list/ отдаёт срез без фото.
+        """
+        pid = str(product_id or "").strip()
+        if not pid:
+            return None
+        paths = (
+            f"/api/main/products/{pid}/",
+            f"/api/main/products/list/{pid}/",
+        )
+        for path in paths:
+            try:
+                data = self._request("GET", path)
+            except ApiError as e:
+                if e.status_code in (404, 405, 410):
+                    continue
+                return None
+            if not isinstance(data, dict):
+                continue
+            inner = data.get("data")
+            if isinstance(inner, dict) and inner.get("id") is not None:
+                return inner
+            if data.get("id") is not None:
+                return data
+        return None
 
     def products_search(self, query: str, limit: int = 40) -> list:
         """

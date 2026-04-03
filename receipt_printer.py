@@ -15,8 +15,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,61 @@ def _qty_display(q: Any) -> str:
         return s if s else "0"
     except (TypeError, ValueError):
         return str(q or "0")
+
+
+def _unit_is_kg(unit: Any) -> bool:
+    raw = str(unit or "").strip().lower()
+    if not raw:
+        return False
+    compact = raw.replace(" ", "").replace(".", "")
+    if compact in ("кг", "kg", "kг", "kilogram", "kilograms"):
+        return True
+    if "килограм" in raw:
+        return True
+    if compact.endswith("кг") or raw.endswith(" kg"):
+        return True
+    return False
+
+
+def _truthy_api_bool(v: Any) -> bool:
+    if v is True:
+        return True
+    if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and v != 0:
+        return True
+    return False
+
+
+def _dict_has_kg_unit(d: dict[str, Any]) -> bool:
+    for key in ("unit", "unit_display", "measure_unit", "sale_unit", "uom"):
+        if _unit_is_kg(d.get(key)):
+            return True
+    return False
+
+
+def _product_must_weigh_for_receipt(p: dict[str, Any]) -> bool:
+    """Совпадает с логикой кассы (main._product_must_weigh): кг по флагам и по полю unit."""
+    if _truthy_api_bool(p.get("is_wait")):
+        return True
+    if _truthy_api_bool(p.get("is_weight")):
+        return True
+    if _dict_has_kg_unit(p):
+        return True
+    return False
+
+
+def _item_unit_label(it: dict[str, Any]) -> str:
+    if not isinstance(it, dict):
+        return "шт"
+    if _truthy_api_bool(it.get("is_wait")) or _truthy_api_bool(it.get("is_weight")):
+        return "кг"
+    if _dict_has_kg_unit(it):
+        return "кг"
+    for src in (it.get("product"), it.get("product_snapshot")):
+        if isinstance(src, dict) and _product_must_weigh_for_receipt(src):
+            return "кг"
+    return "шт"
 
 
 def _wrap_to_width(text: str, width: int = RECEIPT_WIDTH) -> list[str]:
@@ -343,8 +399,6 @@ def _compose_sale_receipt_rows(
         items = []
     valid_items = [it for it in items if isinstance(it, dict)]
 
-    st = cart.get("subtotal")
-    disc = cart.get("discount_total")
     tot = _cart_total(cart)
 
     company_clean = (company or "").strip()
@@ -382,35 +436,22 @@ def _compose_sale_receipt_rows(
         up = _money_display(it.get("unit_price"))
         qty = _qty_display(it.get("quantity", "1")).replace(".", ",")
         lam = _money_display(_line_amount(it))
-        calc = f"{up} x {qty} = {lam}"
-        rows.append(("right", calc))
+        unit_label = _item_unit_label(it)
+        unit_suffix = "сом/кг" if unit_label == "кг" else "сом/шт"
+        rows.append(("left", f"{qty} {unit_label} x {up} {unit_suffix}"))
+        rows.append(("right", lam))
 
     rows.append(("sep",))
-
-    try:
-        dval = float(disc) if disc is not None else 0.0
-    except (TypeError, ValueError):
-        dval = 0.0
-    rows.append(("lr", "Подытог:", _money_display(st)))
-    if abs(dval) > 0.001:
-        rows.append(("lr", "Скидка:", _money_display(abs(dval))))
-
-    pm_label = (
-        "Наличные"
-        if payment_method == "cash"
-        else ("Безнал" if payment_method == "transfer" else str(payment_method))
-    )
-    rows.append(("lr", pm_label, _money_display(tot)))
     rows.append(("lr_bold", "ИТОГ:", _money_display(tot)))
     if payment_method == "cash" and cash_received:
-        rows.append(("lr", "Получено:", _money_display(cash_received)))
+        rows.append(("lr_bold", "ПОЛУЧЕНО:", _money_display(cash_received)))
     if change_amount is not None:
         try:
             chf = float(change_amount)
         except (TypeError, ValueError):
             chf = None
         if chf is not None:
-            rows.append(("lr", "Сдача:", _money_display(chf)))
+            rows.append(("lr_bold", "СДАЧА:", _money_display(chf)))
 
     rows.append(("sep",))
 
@@ -456,6 +497,38 @@ def is_receipt_printing_enabled() -> bool:
     return b == "lpt" and bool((RECEIPT_FILE_PATH or "").strip())
 
 
+def _lpt_retry_attempts() -> int:
+    try:
+        n = int(os.environ.get("DESKTOP_MARKET_RECEIPT_RETRY", "3").strip() or "3")
+    except ValueError:
+        n = 3
+    return max(1, min(8, n))
+
+
+def _run_lpt_job(job: Callable[[], None], *, what: str = "print") -> None:
+    """
+    Повтор при временных сбоях LPT/драйвера (чек «не вышел», повторно сработало).
+    Число попыток: DESKTOP_MARKET_RECEIPT_RETRY (по умолчанию 3).
+    """
+    attempts = _lpt_retry_attempts()
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            job()
+            return
+        except ReceiptPrinterError as e:
+            last = e
+            logger.warning("%s: попытка %s/%s: %s", what, i + 1, attempts, e)
+        except OSError as e:
+            last = ReceiptPrinterError(str(e))
+            last.__cause__ = e
+            logger.warning("%s: LPT OSError %s/%s: %s", what, i + 1, attempts, e)
+        if i + 1 < attempts:
+            time.sleep(0.07 + 0.06 * i)
+    if last is not None:
+        raise last
+
+
 def _open_printer():
     """Создаёт LPT-подключение к ESC/POS-принтеру."""
     try:
@@ -481,6 +554,7 @@ def _open_printer():
         dev = (RECEIPT_FILE_PATH or "").strip() or "LPT1"
         p = File(devfile=dev, **_prof_kw)
         p.open()
+        time.sleep(0.02)
         return p
 
     raise ReceiptPrinterError("Печать чека поддерживается только через LPT1 / LPT2")
@@ -705,24 +779,28 @@ def print_escpos_text_file(devfile: str, text: str) -> None:
     if RECEIPT_ESCPOS_PROFILE:
         _prof_kw["profile"] = RECEIPT_ESCPOS_PROFILE
 
-    p = File(devfile=path, **_prof_kw)
-    p.open()
     user_enc = (RECEIPT_TEXT_ENCODING or "cp866").strip().lower()
     lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
-    try:
-        p.hw("INIT")
-        codec = _apply_escpos_codepage(p, user_enc)
-        p.set(align="left", font="a")
-        _apply_escpos_codepage(p, user_enc)
-        rows = _plain_lines_to_receipt_rows(lines)
-        _emit_receipt_rows(p, codec, rows, user_enc)
-        _safe_cut(p)
-    finally:
+    def _once() -> None:
+        p = File(devfile=path, **_prof_kw)
+        p.open()
+        time.sleep(0.02)
         try:
-            p.close()
-        except Exception as ex:
-            logger.warning("close printer: %s", ex)
+            p.hw("INIT")
+            codec = _apply_escpos_codepage(p, user_enc)
+            p.set(align="left", font="a")
+            _apply_escpos_codepage(p, user_enc)
+            rows = _plain_lines_to_receipt_rows(lines)
+            _emit_receipt_rows(p, codec, rows, user_enc)
+            _safe_cut(p)
+        finally:
+            try:
+                p.close()
+            except Exception as ex:
+                logger.warning("close printer: %s", ex)
+
+    _run_lpt_job(_once, what="print_escpos_text_file")
 
 
 def print_receipt_text(text: str) -> None:
@@ -735,23 +813,26 @@ def print_receipt_text(text: str) -> None:
     if not raw:
         raise ReceiptPrinterError("Пустой текст чека")
 
-    p = _open_printer()
     user_enc = (RECEIPT_TEXT_ENCODING or "cp866").strip().lower()
     lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
-    try:
-        p.hw("INIT")
-        codec = _apply_escpos_codepage(p, user_enc)
-        p.set(align="left", font="a")
-        _apply_escpos_codepage(p, user_enc)
-        rows = _plain_lines_to_receipt_rows(lines)
-        _emit_receipt_rows(p, codec, rows, user_enc)
-        _safe_cut(p)
-    finally:
+    def _once() -> None:
+        p = _open_printer()
         try:
-            p.close()
-        except Exception as ex:
-            logger.warning("close printer: %s", ex)
+            p.hw("INIT")
+            codec = _apply_escpos_codepage(p, user_enc)
+            p.set(align="left", font="a")
+            _apply_escpos_codepage(p, user_enc)
+            rows = _plain_lines_to_receipt_rows(lines)
+            _emit_receipt_rows(p, codec, rows, user_enc)
+            _safe_cut(p)
+        finally:
+            try:
+                p.close()
+            except Exception as ex:
+                logger.warning("close printer: %s", ex)
+
+    _run_lpt_job(_once, what="print_receipt_text")
 
 
 def print_sale_receipt(
@@ -769,7 +850,6 @@ def print_sale_receipt(
     """
     from config import RECEIPT_TEXT_ENCODING
 
-    p = _open_printer()
     user_enc = (RECEIPT_TEXT_ENCODING or "cp866").strip().lower()
     rows = _compose_sale_receipt_rows(
         cart=cart,
@@ -781,18 +861,22 @@ def print_sale_receipt(
         cashier=cashier,
     )
 
-    try:
-        p.hw("INIT")
-        codec = _apply_escpos_codepage(p, user_enc)
-        p.set(align="left", font="a")
-        _apply_escpos_codepage(p, user_enc)
-        _emit_receipt_rows(p, codec, rows, user_enc)
-        _safe_cut(p)
-    finally:
+    def _once() -> None:
+        p = _open_printer()
         try:
-            p.close()
-        except Exception as ex:
-            logger.warning("close printer: %s", ex)
+            p.hw("INIT")
+            codec = _apply_escpos_codepage(p, user_enc)
+            p.set(align="left", font="a")
+            _apply_escpos_codepage(p, user_enc)
+            _emit_receipt_rows(p, codec, rows, user_enc)
+            _safe_cut(p)
+        finally:
+            try:
+                p.close()
+            except Exception as ex:
+                logger.warning("close printer: %s", ex)
+
+    _run_lpt_job(_once, what="print_sale_receipt")
 
 
 def try_print_sale_receipt(**kwargs: Any) -> None:

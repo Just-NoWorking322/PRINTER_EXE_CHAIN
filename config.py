@@ -44,3 +44,17 @@ except ValueError:
     SCALE_COM_BAUD = 9600
 SCALE_LPT = (os.environ.get("DESKTOP_MARKET_SCALE_LPT", "LPT1").strip() or "LPT1")
 # Блок весов на кассе по умолчанию включён (main.py: DESKTOP_MARKET_SCALE_ENABLED пусто или «1»; «0» — выкл.).
+
+
+def _env_truthy(key: str, default: str = "0") -> bool:
+    v = os.environ.get(key, default).strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+# Синхронизация офлайн-чеков: если сервер отклоняет строку из‑за остатков (в т.ч. учёт в пачках),
+# добавить её как произвольную позицию без привязки к карточке — чек уйдёт в CRM, остаток по SKU не спишется.
+# Отключить: DESKTOP_MARKET_POS_SYNC_STOCK_FALLBACK=0
+# «Минус на остатке» задаётся только на стороне NurCRM; клиент не может обойти проверку API иначе.
+POS_SYNC_FALLBACK_CUSTOM_ON_STOCK_ERROR = _env_truthy(
+    "DESKTOP_MARKET_POS_SYNC_STOCK_FALLBACK", "1"
+)

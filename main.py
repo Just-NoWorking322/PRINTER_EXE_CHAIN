@@ -10,12 +10,14 @@ DESKTOP_MARKET_RECEIPT_COERCE_CP866_TABLE — 1: при CP866 принудите
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
 import subprocess
 import sys
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 
 def _patch_escpos_for_pyinstaller() -> None:
@@ -37,10 +39,17 @@ import requests
 
 from api_client import ApiError, JwtClient
 from config import API_BASE_URL, TEST_LOGIN_EMAIL, TEST_LOGIN_PASSWORD
+from product_media import (
+    product_image_candidates,
+    product_image_url as _product_image_url_resolve,
+)
 import app_database
 import local_products_cache
+import offline_pos
+import offline_store
 import config
 import printer_config
+from offline_pos import OfflinePosError, OfflineWeightRequired
 from receipt_printer import (
     ReceiptPrinterError,
     is_receipt_printing_enabled,
@@ -285,6 +294,22 @@ def _product_must_weigh(p: Any) -> bool:
     return False
 
 
+def _product_image_url(p: Any) -> str | None:
+    """URL картинки товара из типичных полей API (абсолютный для Image)."""
+    return _product_image_url_resolve(p, API_BASE_URL)
+
+
+def _thumb_url_is_public_cdn(url: str) -> bool:
+    """True — можно отдать URL прямо в ft.Image (чужой CDN). Наш API — нужен Bearer → data URL."""
+    if not url or str(url).startswith("data:"):
+        return True
+    u = urlparse(str(url).strip())
+    b = urlparse((API_BASE_URL or "http://invalid.local").strip())
+    if u.scheme in ("http", "https") and u.netloc:
+        return (u.netloc or "").lower() != (b.netloc or "").lower()
+    return False
+
+
 def _cart_line_must_weigh(it: dict[str, Any]) -> bool:
     if _truthy_api_bool(it.get("is_wait")) or _truthy_api_bool(it.get("is_weight")):
         return True
@@ -489,12 +514,13 @@ def _fetch_receipt_text_via_api(client: JwtClient, sale_id: Any) -> str | None:
 
 
 # Сканер HID: между символами обычно < 50 ms; пауза больше порога — новый штрих (не сливаем два скана).
-BARCODE_INTERKEY_RESET_MS = 85
+BARCODE_INTERKEY_RESET_MS = 100
 BARCODE_BUFFER_MAX_LEN = 64
 MIN_BARCODE_LEN = 4
 # Поле поиска: не дергать живой поиск по длинной строке «только цифры» (сканер в фокусе поля).
 BARCODE_LIKE_MIN_DIGITS = 8
 LIVE_SEARCH_DEBOUNCE_SEC = 0.22
+OFFLINE_SYNC_POLL_SEC = 5.0
 
 # NUR CRM: три колонки, тёмный бренд-бар сверху, акцент #f7d617
 UI_BRAND = "#f7d617"
@@ -520,6 +546,9 @@ UI_ICON_BADGE_BG = "#fef9c3"
 UI_WARN_BG = "#fffbeb"
 UI_WARN_BORDER = "#f59e0b"
 UI_WARN_TEXT = "#b45309"
+# Название товара в сетке (читаемый «золотой» на белом, в духе витрины).
+UI_CATALOG_TITLE = "#b45309"
+UI_CATALOG_IMAGE_BG = "#f3f4f6"
 
 VK_LAYOUT_RU = (
     ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
@@ -541,7 +570,13 @@ VK_LAYOUT_NUM = (
     ("7", "8", "9"),
     (",", "0", "."),
 )
-QUICK_CATALOG_LIMIT = 45
+QUICK_CATALOG_LIMIT = 60
+# Один запрос каталога вместо двух подборок под лимит карточек.
+QUICK_CATALOG_CATALOG_ITEMS_CAP = QUICK_CATALOG_LIMIT * 8
+QUICK_CATALOG_CATALOG_MAX_PAGES = 10
+# Параллельная подгрузка превью (деталь + картинка по JWT).
+PRODUCT_THUMB_HYDRATE_CONCURRENCY = 6
+PRODUCT_THUMB_MAX_URL_CANDIDATES = 6
 PRODUCT_GRID_COLUMNS = 3
 QUICK_CATALOG_PRESETS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
     "kg": (
@@ -788,6 +823,11 @@ def main(page: ft.Page):
         "pos_cashbox_id": None,
         "active_shift_id": None,
         "cashier_active": False,
+        "pos_mode": "online",
+        "pos_mode_reason": "",
+        "sync_generation": 0,
+        "sync_running": False,
+        "api_reachable": False,
         "barcode_buf": "",
         "barcode_last_ms": 0.0,
         "search_gen": 0,
@@ -795,6 +835,13 @@ def main(page: ft.Page):
         "quick_catalog_products": {"kg": [], "common": []},
         "quick_catalog_loading": {"kg": False, "common": False},
         "quick_catalog_loaded": {"kg": False, "common": False},
+        # vk: left/bottom в Stack overlay (не offset в Row — иначе local_delta и clamp расходятся с экраном).
+        "ui_pos": {
+            "vk": {"left": None, "bottom": None},
+            "_vk_host": {"w": 0.0, "h": 0.0},
+            # flex Row: левая + правая колонка кассы (сумма постоянна).
+            "main_split": {"left": 11, "right": 16, "left_frac": 11.0},
+        },
     }
 
     error_text = ft.Ref[ft.Text]()
@@ -809,10 +856,15 @@ def main(page: ft.Page):
     # Подсказки/ошибки на экране кассы (поле error_text есть только на логине — их не было видно).
     cashier_hint_ref = ft.Ref[ft.Text]()
     status_chip = ft.Ref[ft.Text]()
+    pos_mode_ref = ft.Ref[ft.Text]()
+    sync_status_ref = ft.Ref[ft.Text]()
     order_discount_pct_ref = ft.Ref[ft.TextField]()
     order_discount_sum_ref = ft.Ref[ft.TextField]()
     weight_scale_text = ft.Ref[ft.Text]()
     weight_scale_status = ft.Ref[ft.Text]()
+    vk_panel_inner_ref = ft.Ref[ft.Container]()
+    cashier_left_split_ref = ft.Ref[ft.Container]()
+    cashier_right_split_ref = ft.Ref[ft.Container]()
     scale_state: dict[str, Any] = {"mgr": None}
     virtual_keyboard_host = ft.Ref[ft.Container]()
     virtual_keyboard_body = ft.Ref[ft.Column]()
@@ -851,6 +903,215 @@ def main(page: ft.Page):
         page.snack_bar = ft.SnackBar(ft.Text(msg), bgcolor=color)
         page.snack_bar.open = True
         page.update()
+
+    def _current_user_email() -> str:
+        return str(client.user_payload.get("email") or "").strip().lower()
+
+    def _persist_offline_session() -> None:
+        email = _current_user_email()
+        if not email:
+            return
+        offline_store.save_offline_session(
+            email=email,
+            access_token=client.access,
+            refresh_token=client.refresh,
+            user_payload=dict(client.user_payload or {}),
+            branch_id=client.active_branch_id,
+            cashbox_id=session.get("pos_cashbox_id"),
+            shift_id=session.get("active_shift_id"),
+            shift_open=bool(session.get("active_shift_id")),
+        )
+
+    def _restore_offline_session(email: str | None) -> bool:
+        cached = offline_store.load_offline_session(email)
+        if not cached:
+            return False
+        client.set_tokens(
+            cached.get("access_token") or "",
+            cached.get("refresh_token"),
+            dict(cached.get("user_payload") or {}),
+        )
+        client.sync_branch_from_user()
+        cached_branch_id = str(cached.get("branch_id") or "").strip()
+        if cached_branch_id:
+            client.active_branch_id = cached_branch_id
+        session["pos_cashbox_id"] = cached.get("cashbox_id")
+        session["active_shift_id"] = cached.get("shift_id") if cached.get("shift_open") else None
+        session["needs_shift"] = False
+        return True
+
+    def is_offline_mode() -> bool:
+        return str(session.get("pos_mode") or "online") == "offline"
+
+    def _sync_status_summary() -> str:
+        stats = offline_store.get_sync_stats()
+        pending = int(stats.get("pending") or 0)
+        failed = int(stats.get("failed") or 0)
+        syncing = int(stats.get("syncing") or 0)
+        if syncing:
+            return f"Синк: {syncing}..."
+        if failed:
+            return f"Синк: ошибки {failed}"
+        if pending:
+            return f"Синк: ждут {pending}"
+        return "Синк: пусто"
+
+    def refresh_pos_mode_ui(*, flush: bool = True) -> None:
+        mode = "Офлайн" if is_offline_mode() else "Онлайн"
+        reason = str(session.get("pos_mode_reason") or "").strip()
+        if pos_mode_ref.current:
+            pos_mode_ref.current.value = f"{mode}" if not reason else f"{mode} · {reason}"
+        if sync_status_ref.current:
+            sync_status_ref.current.value = _sync_status_summary()
+        if flush:
+            try:
+                page.update()
+            except RuntimeError:
+                pass
+
+    def set_pos_mode(mode: str, reason: str = "", *, flush: bool = True) -> None:
+        session["pos_mode"] = "offline" if str(mode).strip().lower() == "offline" else "online"
+        session["pos_mode_reason"] = str(reason or "").strip()
+        refresh_pos_mode_ui(flush=flush)
+
+    def _apply_session_cart(cart: dict[str, Any] | None, *, flush: bool = True) -> None:
+        if cart:
+            session["cart"] = cart
+            session["cart_id"] = str(cart.get("id") or "").strip() or None
+            sid = _shift_id_from_cart(cart)
+            if sid:
+                session["active_shift_id"] = sid
+        else:
+            session["cart"] = {}
+            session["cart_id"] = None
+        set_shift_banner(False, flush=False)
+        render_cart_items(flush=False)
+        refresh_pos_mode_ui(flush=False)
+        if flush:
+            page.update()
+
+    def _activate_offline_mode(
+        reason: str,
+        *,
+        adopt_current_cart: bool = False,
+        flush: bool = True,
+    ) -> bool:
+        email = _current_user_email()
+        if client.user_payload:
+            _persist_offline_session()
+        elif not _restore_offline_session(email or None):
+            return False
+        set_pos_mode("offline", reason, flush=False)
+        if adopt_current_cart and session.get("cart"):
+            try:
+                cart = offline_pos.adopt_online_cart(
+                    user_payload=dict(client.user_payload or {}),
+                    branch_id=client.active_branch_id,
+                    cashbox_id=session.get("pos_cashbox_id"),
+                    cart=dict(session.get("cart") or {}),
+                )
+                _apply_session_cart(cart, flush=False)
+            except OfflinePosError:
+                pass
+        refresh_pos_mode_ui(flush=flush)
+        return True
+
+    # Вирт. клавиатура: left/bottom в Stack; размер — ref-хост ignore_interactions (on_size_change).
+    # Перетаскивание: GestureDetector на заголовке (полноэкранный DragTarget блокировал клики по кассе).
+    _VK_PANEL_WIDTH = 460
+    _VK_PANEL_EST_HEIGHT = 300
+    _VK_MARGIN = 8.0
+    _UI_PAN_DRAG_INTERVAL_MS = 0
+
+    def _window_size_wh() -> tuple[float, float]:
+        try:
+            w = float(page.window.width or 0) or 1280.0
+            h = float(page.window.height or 0) or 840.0
+        except Exception:
+            return 1280.0, 840.0
+        return w, h
+
+    def _vk_content_wh() -> tuple[float, float]:
+        box = session["ui_pos"].get("_vk_host") or {}
+        bw = float(box.get("w") or 0.0)
+        bh = float(box.get("h") or 0.0)
+        if bw >= 200.0 and bh >= 200.0:
+            return bw, bh
+        w, h = _window_size_wh()
+        return max(320.0, w - 16.0), max(240.0, h - 16.0)
+
+    def _vk_anchor_if_needed() -> None:
+        d = session["ui_pos"]["vk"]
+        cw, ch = _vk_content_wh()
+        if d.get("left") is None:
+            d["left"] = max(_VK_MARGIN, (cw - float(_VK_PANEL_WIDTH)) / 2.0)
+        if d.get("bottom") is None:
+            d["bottom"] = _VK_MARGIN
+
+    def _vk_clamp_pos_apply() -> None:
+        d = session["ui_pos"]["vk"]
+        _vk_anchor_if_needed()
+        cw, ch = _vk_content_wh()
+        L = max(_VK_MARGIN, min(float(d["left"]), cw - float(_VK_PANEL_WIDTH) - _VK_MARGIN))
+        min_b = _VK_MARGIN
+        max_b = max(min_b, ch - float(_VK_PANEL_EST_HEIGHT) - _VK_MARGIN)
+        B = max(min_b, min(float(d["bottom"]), max_b))
+        d["left"], d["bottom"] = L, B
+        inn = vk_panel_inner_ref.current
+        if inn:
+            inn.left = L
+            inn.bottom = B
+
+    def _vk_on_host_size(e: Any) -> None:
+        box = session["ui_pos"].setdefault("_vk_host", {"w": 0.0, "h": 0.0})
+        try:
+            box["w"] = float(e.width)
+            box["h"] = float(e.height)
+        except (TypeError, ValueError, AttributeError):
+            return
+        if virtual_keyboard_state.get("visible"):
+            _vk_clamp_pos_apply()
+            try:
+                page.update()
+            except RuntimeError:
+                pass
+
+    def _vk_pan_start(_e: Any) -> None:
+        d = session["ui_pos"]["vk"]
+        _vk_anchor_if_needed()
+        virtual_keyboard_state["_vk_pan_L0"] = float(d["left"])
+        virtual_keyboard_state["_vk_pan_B0"] = float(d["bottom"])
+        virtual_keyboard_state["_vk_pan_acc_x"] = 0.0
+        virtual_keyboard_state["_vk_pan_acc_y"] = 0.0
+
+    def _vk_pan_update(e: Any) -> None:
+        dx, dy = _pan_delta_xy(e)
+        virtual_keyboard_state["_vk_pan_acc_x"] = float(
+            virtual_keyboard_state.get("_vk_pan_acc_x") or 0.0
+        ) + dx
+        virtual_keyboard_state["_vk_pan_acc_y"] = float(
+            virtual_keyboard_state.get("_vk_pan_acc_y") or 0.0
+        ) + dy
+        L0 = float(virtual_keyboard_state.get("_vk_pan_L0") or 0.0)
+        B0 = float(virtual_keyboard_state.get("_vk_pan_B0") or 0.0)
+        acc_x = float(virtual_keyboard_state.get("_vk_pan_acc_x") or 0.0)
+        acc_y = float(virtual_keyboard_state.get("_vk_pan_acc_y") or 0.0)
+        d = session["ui_pos"]["vk"]
+        d["left"] = L0 + acc_x
+        d["bottom"] = B0 - acc_y
+        _vk_clamp_pos_apply()
+        try:
+            page.update()
+        except RuntimeError:
+            pass
+
+    def _vk_pan_end(_e: Any = None) -> None:
+        for k in ("_vk_pan_L0", "_vk_pan_B0", "_vk_pan_acc_x", "_vk_pan_acc_y"):
+            virtual_keyboard_state.pop(k, None)
+        try:
+            page.update()
+        except RuntimeError:
+            pass
 
     def _vk_initial_layout(mode: str) -> str:
         m = (mode or "text").strip().lower()
@@ -893,13 +1154,33 @@ def main(page: ft.Page):
     def hide_virtual_keyboard(_e=None) -> None:
         virtual_keyboard_state["visible"] = False
         virtual_keyboard_state["target"] = None
+        for k in ("_vk_grab", "_vk_pan_L0", "_vk_pan_B0", "_vk_pan_acc_x", "_vk_pan_acc_y"):
+            virtual_keyboard_state.pop(k, None)
         host = virtual_keyboard_host.current
         if host:
             host.visible = False
+        inn = vk_panel_inner_ref.current
+        if inn:
+            inn.visible = False
         try:
             page.update()
         except Exception:
             pass
+
+    def _dialogs_open() -> bool:
+        """Модалки Flet живут в _dialogs и рисуются НАД page.overlay — оверлей-клавиатура окажется «сзади»."""
+        stack = getattr(page, "_dialogs", None)
+        if stack is None:
+            return False
+        for d in getattr(stack, "controls", None) or []:
+            if bool(getattr(d, "open", False)):
+                return True
+        return False
+
+    def _show_modal_dialog(dlg: Any) -> None:
+        """Перед модалкой убираем вирт. клавиатуру (оверлей ниже диалога)."""
+        hide_virtual_keyboard()
+        page.show_dialog(dlg)
 
     def dismiss_dialog(_e=None) -> None:
         hide_virtual_keyboard()
@@ -937,6 +1218,24 @@ def main(page: ft.Page):
             page.update()
         except Exception:
             hide_virtual_keyboard()
+
+    def _pan_delta_xy(e: Any) -> tuple[float, float]:
+        # Сначала local_delta — для смещения внутри Stack стабильнее, чем global_delta (см. доку Flet).
+        for attr in ("local_delta", "global_delta"):
+            d = getattr(e, attr, None)
+            if d is not None:
+                try:
+                    return float(d.x), float(d.y)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+        dx = getattr(e, "delta_x", None)
+        dy = getattr(e, "delta_y", None)
+        if dx is not None or dy is not None:
+            try:
+                return float(dx or 0.0), float(dy or 0.0)
+            except (TypeError, ValueError):
+                pass
+        return 0.0, 0.0
 
     def _vk_build_button(
         token: str,
@@ -978,6 +1277,9 @@ def main(page: ft.Page):
             return
         if not virtual_keyboard_state.get("visible"):
             host.visible = False
+            inn0 = vk_panel_inner_ref.current
+            if inn0:
+                inn0.visible = False
             page.update()
             return
         layout = str(virtual_keyboard_state.get("layout") or "ru")
@@ -986,16 +1288,35 @@ def main(page: ft.Page):
         rows: list[ft.Control] = []
         title = str(virtual_keyboard_state.get("title") or "Ввод")
         subtitle = "Русская раскладка" if layout == "ru" else ("English layout" if layout == "en" else "Цифры")
-        toolbar = ft.Row(
-            [
-                ft.Column(
+        drag_head = ft.GestureDetector(
+            mouse_cursor=ft.MouseCursor.GRAB,
+            drag_interval=_UI_PAN_DRAG_INTERVAL_MS,
+            on_pan_start=_vk_pan_start,
+            on_pan_update=_vk_pan_update,
+            on_pan_end=_vk_pan_end,
+            content=ft.Container(
+                padding=ft.Padding.only(right=4, bottom=2),
+                content=ft.Column(
                     [
-                        ft.Text(title, size=11, weight=ft.FontWeight.W_600, color=UI_SURFACE),
+                        ft.Row(
+                            [
+                                ft.Icon(ft.Icons.DRAG_INDICATOR, size=14, color=UI_SIDEBAR_TEXT),
+                                ft.Text(title, size=11, weight=ft.FontWeight.W_600, color=UI_SURFACE),
+                            ],
+                            spacing=4,
+                            tight=True,
+                        ),
                         ft.Text(subtitle, size=8, color=UI_SIDEBAR_TEXT),
+                        ft.Text("Потяните за заголовок, чтобы сдвинуть панель", size=7, color=UI_SIDEBAR_TEXT),
                     ],
                     spacing=1,
                     tight=True,
                 ),
+            ),
+        )
+        toolbar = ft.Row(
+            [
+                drag_head,
                 ft.Container(expand=True),
                 _vk_build_button("LAYOUT_RU", active=layout == "ru"),
                 _vk_build_button("LAYOUT_EN", active=layout == "en"),
@@ -1038,7 +1359,11 @@ def main(page: ft.Page):
                 )
             )
         body.controls = rows
+        _vk_clamp_pos_apply()
         host.visible = True
+        inn1 = vk_panel_inner_ref.current
+        if inn1:
+            inn1.visible = True
         page.update()
 
     def _vk_handle_press(token: str) -> None:
@@ -1081,6 +1406,8 @@ def main(page: ft.Page):
         meta = virtual_keyboard_bindings.get(id(field))
         if not meta:
             return
+        if _dialogs_open():
+            return
         virtual_keyboard_state["visible"] = True
         virtual_keyboard_state["target"] = field
         virtual_keyboard_state["layout"] = _vk_initial_layout(str(meta.get("mode") or "text"))
@@ -1113,40 +1440,6 @@ def main(page: ft.Page):
             "submit_text": submit_text,
         }
         return field
-
-    page.overlay.append(
-        ft.Stack(
-            [
-                ft.Container(
-                    ref=virtual_keyboard_host,
-                    visible=False,
-                    left=6,
-                    right=6,
-                    bottom=6,
-                    content=ft.Row(
-                        [
-                            ft.Container(
-                                width=460,
-                                bgcolor=UI_SIDEBAR,
-                                border_radius=12,
-                                padding=8,
-                                border=ft.Border.all(1, "#1f2937"),
-                                shadow=ft.BoxShadow(
-                                    blur_radius=12,
-                                    spread_radius=1,
-                                    color=ft.Colors.with_opacity(0.20, "#000000"),
-                                    offset=ft.Offset(0, 4),
-                                ),
-                                content=ft.Column(ref=virtual_keyboard_body, spacing=4, tight=True),
-                            )
-                        ],
-                        alignment=ft.MainAxisAlignment.CENTER,
-                    ),
-                )
-            ],
-            expand=True,
-        )
-    )
 
     def on_window_event(ev: ft.WindowEvent):
         if ev.type != ft.WindowEventType.CLOSE:
@@ -1281,13 +1574,45 @@ def main(page: ft.Page):
             snack("Введите % или сумму скидки на чек", ft.Colors.AMBER_700)
             return
 
+        if is_offline_mode():
+            try:
+                cart = offline_pos.apply_order_discount(
+                    cart_id=str(cid),
+                    order_discount_percent=body.get("order_discount_percent"),
+                    order_discount_total=body.get("order_discount_total"),
+                )
+                _apply_session_cart(cart, flush=True)
+                snack("Скидка на чек обновлена", ft.Colors.GREEN_700)
+            except OfflinePosError as ex:
+                snack(str(ex), ft.Colors.RED_700)
+            return
+
         async def _apply_disc():
             set_loading(True)
             try:
                 resp = await asyncio.to_thread(client.pos_cart_patch, cid, body)
                 if not _apply_cart_from_response(resp):
                     await _reload_cart_async()
+                _persist_offline_session()
                 snack("Скидка на чек обновлена", ft.Colors.GREEN_700)
+            except requests.exceptions.RequestException:
+                if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                    try:
+                        cart = offline_pos.apply_order_discount(
+                            cart_id=str(session.get("cart_id") or ""),
+                            order_discount_percent=body.get("order_discount_percent"),
+                            order_discount_total=body.get("order_discount_total"),
+                        )
+                        _apply_session_cart(cart, flush=False)
+                        set_loading(False, flush=False)
+                        page.update()
+                        snack("Скидка на чек обновлена офлайн", ft.Colors.GREEN_700)
+                        return
+                    except OfflinePosError as off_ex:
+                        set_loading(False, flush=False)
+                        snack(str(off_ex), ft.Colors.RED_700)
+                        return
+                snack("Нет сети. Офлайн-сессия недоступна.", ft.Colors.RED_700)
             except ApiError as ex:
                 snack(str(ex), ft.Colors.RED_700)
             finally:
@@ -1300,6 +1625,15 @@ def main(page: ft.Page):
         if not cid:
             return
 
+        if is_offline_mode():
+            try:
+                cart = offline_pos.clear_order_discount(cart_id=str(cid))
+                _apply_session_cart(cart, flush=True)
+                snack("Скидка на чек сброшена", ft.Colors.GREEN_700)
+            except OfflinePosError as ex:
+                snack(str(ex), ft.Colors.RED_700)
+            return
+
         async def _clear_disc():
             set_loading(True)
             try:
@@ -1310,6 +1644,7 @@ def main(page: ft.Page):
                 )
                 if not _apply_cart_from_response(resp):
                     await _reload_cart_async()
+                _persist_offline_session()
                 snack("Скидка на чек сброшена", ft.Colors.GREEN_700)
             except ApiError:
                 try:
@@ -1318,20 +1653,82 @@ def main(page: ft.Page):
                     )
                     if not _apply_cart_from_response(resp2):
                         await _reload_cart_async()
+                    _persist_offline_session()
                     snack("Скидка на чек сброшена", ft.Colors.GREEN_700)
                 except ApiError as ex2:
                     snack(str(ex2), ft.Colors.RED_700)
+                except requests.exceptions.RequestException:
+                    if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                        try:
+                            cart = offline_pos.clear_order_discount(
+                                cart_id=str(session.get("cart_id") or "")
+                            )
+                            _apply_session_cart(cart, flush=False)
+                            set_loading(False, flush=False)
+                            page.update()
+                            snack("Скидка на чек сброшена офлайн", ft.Colors.GREEN_700)
+                            return
+                        except OfflinePosError as off_ex:
+                            set_loading(False, flush=False)
+                            snack(str(off_ex), ft.Colors.RED_700)
+                            return
+                    snack("Нет сети. Офлайн-сессия недоступна.", ft.Colors.RED_700)
+            except requests.exceptions.RequestException:
+                if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                    try:
+                        cart = offline_pos.clear_order_discount(
+                            cart_id=str(session.get("cart_id") or "")
+                        )
+                        _apply_session_cart(cart, flush=False)
+                        set_loading(False, flush=False)
+                        page.update()
+                        snack("Скидка на чек сброшена офлайн", ft.Colors.GREEN_700)
+                        return
+                    except OfflinePosError as off_ex:
+                        set_loading(False, flush=False)
+                        snack(str(off_ex), ft.Colors.RED_700)
+                        return
+                snack("Нет сети. Офлайн-сессия недоступна.", ft.Colors.RED_700)
             finally:
                 set_loading(False)
 
         page.run_task(_clear_disc)
+
+    async def _dialog_scale_live_loop(
+        live_ref: ft.Ref[ft.Text],
+        stop: list[bool],
+        dlg: ft.AlertDialog | None = None,
+    ) -> None:
+        """Пока открыт диалог — обновляет подпись веса с COM (как блок слева)."""
+        while not stop[0]:
+            if dlg is not None and getattr(dlg, "open", True) is False:
+                break
+            mgr = scale_state.get("mgr")
+            if live_ref.current:
+                if mgr:
+                    w = mgr.get_last_weight()
+                    if w is not None and w > 0:
+                        live_ref.current.value = f"{w:.3f} кг"
+                    else:
+                        live_ref.current.value = "—"
+                else:
+                    live_ref.current.value = "Весы не настроены"
+            try:
+                page.update()
+            except RuntimeError:
+                break
+            await asyncio.sleep(0.2)
 
     def open_line_item_edit(item: dict[str, Any], item_id: str):
         cid = session.get("cart_id")
         if not cid:
             return
 
+        weigh_line = _cart_line_must_weigh(item)
+        stop_mirror: list[bool] = [False]
+
         def _save(_e=None):
+            stop_mirror[0] = True
             err = validate_quantity(tf_qty.value)
             if err:
                 snack(err, ft.Colors.AMBER_700)
@@ -1353,6 +1750,23 @@ def main(page: ft.Page):
                 else "0.00",
             }
 
+            if is_offline_mode():
+                try:
+                    cart = offline_pos.update_item(
+                        cart_id=str(cid),
+                        item_id=item_id,
+                        quantity=body["quantity"],
+                        unit_price=body["unit_price"],
+                        discount_total=body["discount_total"],
+                    )
+                    hide_virtual_keyboard()
+                    page.dialog.open = False
+                    _apply_session_cart(cart, flush=True)
+                    snack("Позиция обновлена", ft.Colors.GREEN_700)
+                except OfflinePosError as ex:
+                    snack(str(ex), ft.Colors.RED_700)
+                return
+
             async def _save_line():
                 set_loading(True, flush=False)
                 try:
@@ -1361,6 +1775,28 @@ def main(page: ft.Page):
                     page.dialog.open = False
                     if not _apply_cart_from_response(resp, flush=False):
                         await _reload_cart_async(flush=False)
+                    _persist_offline_session()
+                except requests.exceptions.RequestException:
+                    if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                        try:
+                            cart = offline_pos.update_item(
+                                cart_id=str(session.get("cart_id") or ""),
+                                item_id=item_id,
+                                quantity=body["quantity"],
+                                unit_price=body["unit_price"],
+                                discount_total=body["discount_total"],
+                            )
+                            hide_virtual_keyboard()
+                            page.dialog.open = False
+                            _apply_session_cart(cart, flush=False)
+                        except OfflinePosError as off_ex:
+                            set_loading(False, flush=False)
+                            snack(str(off_ex), ft.Colors.RED_700)
+                            return
+                    else:
+                        set_loading(False, flush=False)
+                        snack("Нет сети. Офлайн-сессия недоступна.", ft.Colors.RED_700)
+                        return
                 except ApiError as ex:
                     set_loading(False, flush=False)
                     snack(str(ex), ft.Colors.RED_700)
@@ -1371,6 +1807,7 @@ def main(page: ft.Page):
             page.run_task(_save_line)
 
         def _cancel(_e):
+            stop_mirror[0] = True
             hide_virtual_keyboard()
             page.dialog.open = False
             page.update()
@@ -1380,14 +1817,15 @@ def main(page: ft.Page):
             dval = item.get("line_discount")
         tf_qty = bind_virtual_keyboard(
             ft.TextField(
-                label="Количество",
+                label="Вес, кг" if weigh_line else "Количество",
                 value=str(item.get("quantity", "1")),
+                hint_text="Вручную или «Подставить вес»" if weigh_line else None,
                 dense=True,
                 width=280,
                 on_submit=_save,
             ),
             mode="numeric",
-            title="Количество",
+            title="Вес, кг" if weigh_line else "Количество",
             submit=_save,
             submit_text="Сохранить",
         )
@@ -1418,16 +1856,71 @@ def main(page: ft.Page):
             submit_text="Сохранить",
         )
 
+        content_controls: list[ft.Control] = []
+        dlg: ft.AlertDialog
+        if weigh_line:
+            live_scale_ref = ft.Ref[ft.Text]()
+
+            def _apply_scale_to_qty_line(_e):
+                m = scale_state.get("mgr")
+                if not m:
+                    snack("Весы не подключены — настройте COM в «Весы»", ft.Colors.AMBER_700)
+                    return
+                w = m.get_last_weight()
+                if w is None or w <= 0:
+                    snack("Нет веса с весов (поставьте товар и подождите)", ft.Colors.AMBER_700)
+                    return
+                s = f"{w:.3f}".rstrip("0").rstrip(".")
+                tf_qty.value = s if s else str(w)
+                page.update()
+
+            content_controls.append(
+                ft.Container(
+                    padding=ft.Padding.only(bottom=6),
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                "С весов сейчас (обновляется, как слева)",
+                                size=11,
+                                color=UI_MUTED,
+                            ),
+                            ft.Text(
+                                ref=live_scale_ref,
+                                value="—",
+                                size=22,
+                                weight=ft.FontWeight.W_600,
+                                color=UI_TEXT,
+                            ),
+                            ft.Row(
+                                [
+                                    ft.OutlinedButton(
+                                        "С весов",
+                                        icon=ft.Icons.SCALE_OUTLINED,
+                                        on_click=_apply_scale_to_qty_line,
+                                    ),
+                                ],
+                                tight=True,
+                            ),
+                        ],
+                        tight=True,
+                        spacing=6,
+                    ),
+                )
+            )
+        content_controls.extend([tf_qty, tf_price, tf_disc])
+
         dlg = ft.AlertDialog(
             modal=True,
             bgcolor=UI_SURFACE,
             shape=ft.RoundedRectangleBorder(radius=16),
             title=ft.Text(
-                "Цена и скидка по строке",
+                "Вес, цена и скидка по строке" if weigh_line else "Цена и скидка по строке",
                 color=UI_TEXT,
                 weight=ft.FontWeight.W_600,
             ),
-            content=ft.Column([tf_qty, tf_price, tf_disc], tight=True, width=320, scroll=ft.ScrollMode.AUTO),
+            content=ft.Column(
+                content_controls, tight=True, width=320, scroll=ft.ScrollMode.AUTO
+            ),
             actions=[
                 ft.TextButton("Отмена", on_click=_cancel),
                 ft.FilledButton(
@@ -1440,6 +1933,8 @@ def main(page: ft.Page):
         page.dialog = dlg
         dlg.open = True
         page.update()
+        if weigh_line:
+            page.run_task(_dialog_scale_live_loop, live_scale_ref, stop_mirror, dlg)
 
     def set_shift_banner(needs: bool, detail: str = "", *, flush: bool = True):
         session["needs_shift"] = needs
@@ -1535,6 +2030,17 @@ def main(page: ft.Page):
                     if q <= 0:
                         remove_item(item_id)
                         return
+                    if is_offline_mode():
+                        try:
+                            cart = offline_pos.update_item(
+                                cart_id=str(cid),
+                                item_id=item_id,
+                                quantity=str(q),
+                            )
+                            _apply_session_cart(cart, flush=True)
+                        except OfflinePosError as ex:
+                            snack(str(ex), ft.Colors.RED_700)
+                        return
 
                     async def _qty_async():
                         set_loading(True, flush=False)
@@ -1547,6 +2053,24 @@ def main(page: ft.Page):
                             )
                             if not _apply_cart_from_response(resp, flush=False):
                                 await _reload_cart_async(flush=False)
+                            _persist_offline_session()
+                        except requests.exceptions.RequestException:
+                            if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                                try:
+                                    cart = offline_pos.update_item(
+                                        cart_id=str(session.get("cart_id") or ""),
+                                        item_id=item_id,
+                                        quantity=str(q),
+                                    )
+                                    _apply_session_cart(cart, flush=False)
+                                except OfflinePosError as off_ex:
+                                    set_loading(False, flush=False)
+                                    snack(str(off_ex), ft.Colors.RED_700)
+                                    return
+                            else:
+                                set_loading(False, flush=False)
+                                snack("Нет сети. Офлайн-сессия недоступна.", ft.Colors.RED_700)
+                                return
                         except ApiError as ex:
                             snack(str(ex), ft.Colors.RED_700)
                         finally:
@@ -1557,12 +2081,36 @@ def main(page: ft.Page):
                 def remove_item(item_id=iid):
                     if not cid or not item_id:
                         return
+                    if is_offline_mode():
+                        try:
+                            cart = offline_pos.delete_item(cart_id=str(cid), item_id=item_id)
+                            _apply_session_cart(cart, flush=True)
+                        except OfflinePosError as ex:
+                            snack(str(ex), ft.Colors.RED_700)
+                        return
 
                     async def _del_async():
                         set_loading(True, flush=False)
                         try:
                             await asyncio.to_thread(client.pos_cart_item_delete, cid, item_id)
                             await _reload_cart_async(flush=False)
+                            _persist_offline_session()
+                        except requests.exceptions.RequestException:
+                            if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                                try:
+                                    cart = offline_pos.delete_item(
+                                        cart_id=str(session.get("cart_id") or ""),
+                                        item_id=item_id,
+                                    )
+                                    _apply_session_cart(cart, flush=False)
+                                except OfflinePosError as off_ex:
+                                    set_loading(False, flush=False)
+                                    snack(str(off_ex), ft.Colors.RED_700)
+                                    return
+                            else:
+                                set_loading(False, flush=False)
+                                snack("Нет сети. Офлайн-сессия недоступна.", ft.Colors.RED_700)
+                                return
                         except ApiError as ex:
                             snack(str(ex), ft.Colors.RED_700)
                         finally:
@@ -1596,7 +2144,11 @@ def main(page: ft.Page):
                                         ),
                                         ft.IconButton(
                                             ft.Icons.EDIT_NOTE,
-                                            tooltip="Цена и скидка строки",
+                                            tooltip=(
+                                                "Вес, цена и скидка"
+                                                if line_is_weighed
+                                                else "Цена и скидка строки"
+                                            ),
                                             icon_color=UI_MUTED,
                                             icon_size=20,
                                             style=_icon_btn_style,
@@ -1654,7 +2206,15 @@ def main(page: ft.Page):
             total_txt.current.value = f"{_money(tot_due)} сом"
         if status_chip.current:
             cid = session.get("cart_id")
-            status_chip.current.value = f"Корзина: {str(cid)[:8]}…" if cid else "Нет активной корзины"
+            prefix = "Офлайн · " if is_offline_mode() else ""
+            cid_s = str(cid or "").strip()
+            if cid_s.startswith("offline-"):
+                status_text = "Локальная корзина"
+            elif cid_s:
+                status_text = f"Корзина: {cid_s[:8]}…"
+            else:
+                status_text = "Нет активной корзины"
+            status_chip.current.value = f"{prefix}{status_text}"
         sync_order_discount_fields()
         if flush:
             page.update()
@@ -1664,6 +2224,19 @@ def main(page: ft.Page):
 
     def try_start_sale():
         async def _start():
+            if is_offline_mode():
+                try:
+                    cart = offline_pos.start_sale(
+                        user_payload=dict(client.user_payload or {}),
+                        branch_id=client.active_branch_id,
+                        cashbox_id=session.get("pos_cashbox_id"),
+                    )
+                    set_shift_banner(False, flush=False)
+                    _apply_session_cart(cart, flush=True)
+                    show_error("", flush=False)
+                except OfflinePosError as ex:
+                    show_error(str(ex))
+                return
             set_loading(True, flush=False)
             set_shift_banner(False, flush=False)
             try:
@@ -1687,11 +2260,32 @@ def main(page: ft.Page):
                     local_products_cache.ingest_cart(client.active_branch_id, cart)
                 except Exception:
                     pass
+                _persist_offline_session()
                 set_shift_banner(False, flush=False)
                 render_cart_items(flush=False)
                 show_error("", flush=False)
                 set_loading(False, flush=False)
                 snack("Продажа начата", ft.Colors.GREEN_700)
+            except requests.exceptions.RequestException as ex:
+                if _activate_offline_mode("нет сети", adopt_current_cart=False, flush=False):
+                    try:
+                        cart = offline_pos.start_sale(
+                            user_payload=dict(client.user_payload or {}),
+                            branch_id=client.active_branch_id,
+                            cashbox_id=session.get("pos_cashbox_id"),
+                        )
+                        _apply_session_cart(cart, flush=False)
+                        show_error("", flush=False)
+                        set_loading(False, flush=False)
+                        page.update()
+                        snack(
+                            "Сеть недоступна. Касса переключена в офлайн-режим.",
+                            ft.Colors.AMBER_700,
+                        )
+                    except OfflinePosError as off_ex:
+                        show_error(str(off_ex))
+                else:
+                    snack(f"Сеть: {ex}", ft.Colors.RED_700)
             except ApiError as ex:
                 pl = ex.payload
                 detail = ""
@@ -1717,6 +2311,26 @@ def main(page: ft.Page):
         code, bc_err = normalize_barcode_for_scan(code)
         if bc_err:
             show_error(bc_err)
+            return
+        if is_offline_mode():
+            try:
+                cart = offline_pos.scan_barcode(
+                    user_payload=dict(client.user_payload or {}),
+                    branch_id=client.active_branch_id,
+                    cashbox_id=session.get("pos_cashbox_id"),
+                    barcode=code,
+                )
+                _apply_session_cart(cart, flush=True)
+            except OfflineWeightRequired as ex:
+                current = offline_pos.current_cart(
+                    user_payload=dict(client.user_payload or {}),
+                    branch_id=client.active_branch_id,
+                )
+                if current:
+                    _apply_session_cart(current, flush=False)
+                open_weighed_product_dialog(ex.product)
+            except OfflinePosError as ex:
+                show_error(str(ex))
             return
         cid = session.get("cart_id")
         if not cid:
@@ -1746,12 +2360,58 @@ def main(page: ft.Page):
                     cart = await asyncio.to_thread(client.pos_add_item, cid_s, cached_pid)
                 except ApiError:
                     cart = None
+                except requests.exceptions.RequestException:
+                    if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                        try:
+                            cart = offline_pos.scan_barcode(
+                                user_payload=dict(client.user_payload or {}),
+                                branch_id=branch,
+                                cashbox_id=session.get("pos_cashbox_id"),
+                                barcode=code,
+                            )
+                            _apply_session_cart(cart, flush=True)
+                        except OfflineWeightRequired as ex:
+                            current = offline_pos.current_cart(
+                                user_payload=dict(client.user_payload or {}),
+                                branch_id=branch,
+                            )
+                            if current:
+                                _apply_session_cart(current, flush=False)
+                            open_weighed_product_dialog(ex.product)
+                        except OfflinePosError as off_ex:
+                            show_error(str(off_ex))
+                    else:
+                        show_error("Нет сети. Офлайн-сессия недоступна.")
+                    return
             if cart is None:
                 try:
                     cart = await asyncio.to_thread(client.pos_scan, cid_s, code)
                 except ApiError as ex:
                     if seq == session.get("scan_seq"):
                         show_error(str(ex))
+                    return
+                except requests.exceptions.RequestException:
+                    if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                        try:
+                            cart = offline_pos.scan_barcode(
+                                user_payload=dict(client.user_payload or {}),
+                                branch_id=branch,
+                                cashbox_id=session.get("pos_cashbox_id"),
+                                barcode=code,
+                            )
+                            _apply_session_cart(cart, flush=True)
+                        except OfflineWeightRequired as ex:
+                            current = offline_pos.current_cart(
+                                user_payload=dict(client.user_payload or {}),
+                                branch_id=branch,
+                            )
+                            if current:
+                                _apply_session_cart(current, flush=False)
+                            open_weighed_product_dialog(ex.product)
+                        except OfflinePosError as off_ex:
+                            show_error(str(off_ex))
+                    else:
+                        show_error("Нет сети. Офлайн-сессия недоступна.")
                     return
             if seq != session.get("scan_seq"):
                 return
@@ -1760,6 +2420,7 @@ def main(page: ft.Page):
                 local_products_cache.ingest_cart(branch, cart)
             except Exception:
                 pass
+            _persist_offline_session()
             render_cart_items()
 
         page.run_task(_scan_task)
@@ -1811,10 +2472,39 @@ def main(page: ft.Page):
         if changed and flush:
             page.update()
 
-    def add_product_by_id(product_id: str, quantity: str | None = None):
+    def add_product_by_id(
+        product_id: str,
+        quantity: str | None = None,
+        *,
+        pick_seq: int | None = None,
+    ):
         err = validate_product_id(product_id)
         if err:
             snack(err, ft.Colors.AMBER_700)
+            return
+        if is_offline_mode():
+            try:
+                cart = offline_pos.add_product_by_id(
+                    user_payload=dict(client.user_payload or {}),
+                    branch_id=client.active_branch_id,
+                    cashbox_id=session.get("pos_cashbox_id"),
+                    product_id=product_id,
+                    quantity=quantity,
+                )
+                _apply_session_cart(cart, flush=False)
+                reset_search_panel(show_quick_catalog=True, flush=False)
+                show_error("", flush=False)
+                page.update()
+            except OfflineWeightRequired as ex:
+                current = offline_pos.current_cart(
+                    user_payload=dict(client.user_payload or {}),
+                    branch_id=client.active_branch_id,
+                )
+                if current:
+                    _apply_session_cart(current, flush=False)
+                open_weighed_product_dialog(ex.product)
+            except OfflinePosError as ex:
+                snack(str(ex), ft.Colors.RED_700)
             return
         cid = session.get("cart_id")
         if not cid:
@@ -1822,13 +2512,19 @@ def main(page: ft.Page):
             return
 
         async def _add():
+            if pick_seq is not None and pick_seq != session.get("pick_product_seq"):
+                return
             set_loading(True, flush=False)
             try:
+                if pick_seq is not None and pick_seq != session.get("pick_product_seq"):
+                    return
                 q = (quantity or "").strip()
                 if q:
                     resp = await asyncio.to_thread(client.pos_add_item, cid, product_id, q)
                 else:
                     resp = await asyncio.to_thread(client.pos_add_item, cid, product_id)
+                if pick_seq is not None and pick_seq != session.get("pick_product_seq"):
+                    return
                 if not _apply_cart_from_response(resp, flush=False):
                     await _reload_cart_async(flush=False)
                 try:
@@ -1837,8 +2533,38 @@ def main(page: ft.Page):
                     )
                 except Exception:
                     pass
+                _persist_offline_session()
                 reset_search_panel(show_quick_catalog=True, flush=False)
                 show_error("", flush=False)
+            except requests.exceptions.RequestException:
+                if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                    try:
+                        cart = offline_pos.add_product_by_id(
+                            user_payload=dict(client.user_payload or {}),
+                            branch_id=client.active_branch_id,
+                            cashbox_id=session.get("pos_cashbox_id"),
+                            product_id=product_id,
+                            quantity=quantity,
+                        )
+                        _apply_session_cart(cart, flush=False)
+                        reset_search_panel(show_quick_catalog=True, flush=False)
+                        show_error("", flush=False)
+                    except OfflineWeightRequired as ex:
+                        set_loading(False, flush=False)
+                        current = offline_pos.current_cart(
+                            user_payload=dict(client.user_payload or {}),
+                            branch_id=client.active_branch_id,
+                        )
+                        if current:
+                            _apply_session_cart(current, flush=False)
+                        open_weighed_product_dialog(ex.product)
+                        return
+                    except OfflinePosError as off_ex:
+                        set_loading(False, flush=False)
+                        snack(str(off_ex), ft.Colors.RED_700)
+                        return
+                else:
+                    snack("Нет сети. Офлайн-сессия недоступна.", ft.Colors.RED_700)
             except ApiError as ex:
                 snack(str(ex), ft.Colors.RED_700)
             finally:
@@ -1866,7 +2592,10 @@ def main(page: ft.Page):
             if w is not None and w > 0:
                 initial = f"{w:.3f}".rstrip("0").rstrip(".") or str(w)
 
+        stop_scale_mirror = [False]
+
         def close_dlg():
+            stop_scale_mirror[0] = True
             dismiss_dialog()
 
         def do_weighed_add(_e=None):
@@ -1891,20 +2620,18 @@ def main(page: ft.Page):
             tf_q.value = s if s else str(w)
             page.update()
 
-        tf_q = bind_virtual_keyboard(
-            ft.TextField(
-                label="Вес, кг",
-                value=initial,
-                hint_text="Введите вручную или «С весов»",
-                dense=True,
-                autofocus=True,
-                on_submit=do_weighed_add,
-            ),
-            mode="numeric",
-            title="Вес товара",
-            submit=do_weighed_add,
-            submit_text="В чек",
+        # Не bind_virtual_keyboard: оверлей-клавиатура в page.overlay под модалкой и с expand ломает клики по диалогу.
+        tf_q = ft.TextField(
+            label="Вес, кг",
+            value=initial,
+            hint_text="Введите вручную или «С весов»",
+            dense=True,
+            autofocus=True,
+            on_submit=do_weighed_add,
+            keyboard_type=ft.KeyboardType.NUMBER,
         )
+
+        weighed_live_scale_ref = ft.Ref[ft.Text]()
 
         dlg = ft.AlertDialog(
             modal=True,
@@ -1921,6 +2648,27 @@ def main(page: ft.Page):
                         f"Цена за кг: {_money(product.get('price'))} сом",
                         size=12,
                         color=UI_MUTED,
+                    ),
+                    ft.Container(
+                        padding=ft.Padding.only(top=4, bottom=4),
+                        content=ft.Column(
+                            [
+                                ft.Text(
+                                    "На весах сейчас (как слева на кассе)",
+                                    size=11,
+                                    color=UI_MUTED,
+                                ),
+                                ft.Text(
+                                    ref=weighed_live_scale_ref,
+                                    value="—",
+                                    size=22,
+                                    weight=ft.FontWeight.W_600,
+                                    color=UI_TEXT,
+                                ),
+                            ],
+                            tight=True,
+                            spacing=4,
+                        ),
                     ),
                     tf_q,
                     ft.OutlinedButton(
@@ -1942,16 +2690,24 @@ def main(page: ft.Page):
                 ),
             ],
         )
-        page.show_dialog(dlg)
+        _show_modal_dialog(dlg)
+        page.run_task(
+            _dialog_scale_live_loop,
+            weighed_live_scale_ref,
+            stop_scale_mirror,
+            dlg,
+        )
 
     def pick_product_from_search(p: dict[str, Any]):
         if not isinstance(p, dict) or not p.get("id"):
             snack("Некорректная карточка товара", ft.Colors.AMBER_700)
             return
+        session["pick_product_seq"] = int(session.get("pick_product_seq") or 0) + 1
+        seq = int(session["pick_product_seq"])
         if _product_must_weigh(p):
             open_weighed_product_dialog(p)
         else:
-            add_product_by_id(str(p.get("id")))
+            add_product_by_id(str(p.get("id")), pick_seq=seq)
 
     def _quick_catalog_matches_tab(p: dict[str, Any], tab: str) -> bool:
         return _product_must_weigh(p) if tab == "kg" else not _product_must_weigh(p)
@@ -1993,8 +2749,17 @@ def main(page: ft.Page):
             item["id"] = pid_s
             item["name"] = _quick_catalog_name(item) or f"Товар #{pid_s}"
             prev = uniq.get(pid_s)
-            if prev is None or _quick_catalog_score(item, tab) > _quick_catalog_score(prev, tab):
+            if prev is None:
                 uniq[pid_s] = item
+            else:
+                s_new = _quick_catalog_score(item, tab)
+                s_old = _quick_catalog_score(prev, tab)
+                if s_new > s_old:
+                    uniq[pid_s] = item
+                elif s_new == s_old and _product_image_url(item) and not _product_image_url(
+                    prev
+                ):
+                    uniq[pid_s] = item
         ordered = sorted(
             uniq.values(),
             key=lambda p: (
@@ -2038,72 +2803,335 @@ def main(page: ft.Page):
             if score > best_score:
                 best_item = p
                 best_score = score
+            elif score == best_score and best_item is not None:
+                if _product_image_url(p) and not _product_image_url(best_item):
+                    best_item = p
         return dict(best_item) if best_item is not None and best_score >= 0 else None
+
+    def _product_card_image_src(p: dict[str, Any]) -> str | None:
+        pid = str(p.get("id") or "").strip()
+        cache = session.get("product_thumb_cache") or {}
+        if pid and isinstance(cache.get(pid), str):
+            return cache[pid]
+        disp = p.get("_display_image")
+        if isinstance(disp, str) and disp.startswith("data:"):
+            return disp
+        raw = _product_image_url(p)
+        if raw and _thumb_url_is_public_cdn(raw):
+            return raw
+        return None
+
+    async def _hydrate_product_thumbs(items: list[Any], context: str) -> None:
+        if not items or not getattr(client, "access", None):
+            return
+        cache: dict[str, str] = session.setdefault("product_thumb_cache", {})
+        detail_cache: dict[str, Any] = session.setdefault("product_detail_cache", {})
+        lk = session.get("_thumb_detail_lock")
+        if lk is None:
+            lk = asyncio.Lock()
+            session["_thumb_detail_lock"] = lk
+
+        _detail_keys = (
+            "images",
+            "primary_image",
+            "primary_image_url",
+            "image_url",
+            "thumbnail_url",
+            "photo_url",
+            "picture",
+            "main_image",
+        )
+
+        async def _merge_detail_into_product(pid: str, p: dict[str, Any]) -> None:
+            imgs = p.get("images")
+            if isinstance(imgs, list) and len(imgs) > 0:
+                return
+            dmerge: dict[str, Any] | None
+            if pid in detail_cache:
+                raw0 = detail_cache.get(pid)
+                dmerge = raw0 if isinstance(raw0, dict) else None
+            else:
+                async with lk:
+                    if pid not in detail_cache:
+                        try:
+                            d = await asyncio.to_thread(client.products_detail, pid)
+                        except Exception:
+                            d = None
+                        detail_cache[pid] = d if isinstance(d, dict) else None
+                    raw = detail_cache.get(pid)
+                    dmerge = raw if isinstance(raw, dict) else None
+            if not isinstance(dmerge, dict):
+                return
+            for k in _detail_keys:
+                v = dmerge.get(k)
+                if v is None or v == "":
+                    continue
+                if k == "images" and isinstance(v, list) and len(v) == 0:
+                    continue
+                p[k] = v
+
+        async def _fetch_image_data_url(abs_url: str) -> str | None:
+            for use_br in (False, True):
+                body, ct = await asyncio.to_thread(
+                    client.fetch_authenticated_image,
+                    abs_url,
+                    with_branch_params=use_br,
+                )
+                if not body:
+                    continue
+                mime = (ct or "image/jpeg").split(";")[0].strip() or "image/jpeg"
+                if "json" in mime or mime.startswith("text/"):
+                    continue
+                return (
+                    f"data:{mime};base64,"
+                    f"{base64.standard_b64encode(body).decode('ascii')}"
+                )
+            return None
+
+        sem = asyncio.Semaphore(PRODUCT_THUMB_HYDRATE_CONCURRENCY)
+
+        async def _hydrate_one(p: dict[str, Any]) -> bool:
+            pid = str(p.get("id") or "").strip()
+            if not pid:
+                return False
+            if pid in cache:
+                p["_display_image"] = cache[pid]
+                return False
+            async with sem:
+                await _merge_detail_into_product(pid, p)
+                candidates = product_image_candidates(p, API_BASE_URL)
+                if not candidates:
+                    return False
+                got: str | None = None
+                for abs_url in candidates[:PRODUCT_THUMB_MAX_URL_CANDIDATES]:
+                    got = await _fetch_image_data_url(abs_url)
+                    if got:
+                        break
+            if got:
+                cache[pid] = got
+                p["_display_image"] = got
+                return True
+            return False
+
+        dict_items = [p for p in items if isinstance(p, dict)]
+        results = await asyncio.gather(*(_hydrate_one(p) for p in dict_items))
+        changed = any(results)
+        if not changed:
+            return
+        if context.startswith("c:"):
+            want_tab = context[2:]
+            if str(session.get("quick_catalog_tab") or "kg") != want_tab:
+                return
+            cur_q = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+            if len(cur_q) >= 2:
+                return
+            _render_quick_catalog()
+            return
+        if context.startswith("s:"):
+            want_q = context[2:]
+            cur_q = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+            if cur_q != want_q:
+                return
+            col = search_results_ref.current
+            if not col:
+                return
+            col.controls.clear()
+            _append_products_grid(col, items)
+            try:
+                page.update()
+            except Exception:
+                pass
 
     def _build_search_product_card(p: dict[str, Any]) -> ft.Control:
         title = str(p.get("name") or p.get("title") or "—")
-        price = _money(p.get("price"))
+        price_raw = p.get("price")
+        price = _money(price_raw)
         must_weigh = _product_must_weigh(p)
-        sub_price = f"{price} сом/кг" if must_weigh else f"{price} сом"
+        unit_suffix = " сом/кг" if must_weigh else " сом"
+        price_line = f"{price}{unit_suffix}"
         badge_text = "кг" if must_weigh else "шт"
+        img_src = _product_card_image_src(p)
 
-        def on_pick(e, row=p):
-            pick_product_from_search(row)
+        old_val = None
+        for k in (
+            "compare_at_price",
+            "list_price",
+            "old_price",
+            "regular_price",
+            "base_price",
+            "price_before_discount",
+        ):
+            v = p.get(k)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+                if fv > 0:
+                    old_val = fv
+                    break
+            except (TypeError, ValueError):
+                continue
+        try:
+            cur_f = float(price_raw) if price_raw is not None else 0.0
+        except (TypeError, ValueError):
+            cur_f = 0.0
+        show_old = old_val is not None and old_val > cur_f + 0.004
+        disc_pct = 0
+        if show_old and old_val:
+            disc_pct = int(round((1.0 - cur_f / old_val) * 100)) if old_val > 0 else 0
+            disc_pct = max(0, min(99, disc_pct))
 
-        return ft.GestureDetector(
-            on_tap=on_pick,
-            content=ft.Container(
-                expand=True,
-                height=92,
-                padding=ft.Padding.symmetric(horizontal=8, vertical=8),
-                bgcolor=UI_SURFACE,
-                border_radius=12,
-                border=ft.Border.all(1, UI_BORDER),
-                content=ft.Column(
+        stock_ok = True
+        for k in ("stock_quantity", "quantity_available", "available_qty", "stock"):
+            v = p.get(k)
+            if v is None:
+                continue
+            try:
+                stock_ok = float(v) > 0
+            except (TypeError, ValueError):
+                continue
+            break
+
+        img_h = 148
+        if img_src:
+            img_ctrl: ft.Control = ft.Image(
+                src=img_src,
+                height=img_h - 16,
+                fit=ft.BoxFit.CONTAIN,
+                gapless_playback=True,
+            )
+        else:
+            img_ctrl = ft.Icon(ft.Icons.IMAGE_OUTLINED, size=56, color=UI_MUTED)
+
+        badge = ft.Container(
+            content=ft.Text(
+                badge_text,
+                size=10,
+                color=UI_TEXT,
+                weight=ft.FontWeight.W_700,
+            ),
+            bgcolor=UI_ACCENT,
+            border_radius=6,
+            padding=ft.Padding.symmetric(horizontal=8, vertical=3),
+        )
+
+        img_stack = ft.Stack(
+            [
+                ft.Container(
+                    expand=True,
+                    bgcolor=UI_CATALOG_IMAGE_BG,
+                    alignment=ft.Alignment.CENTER,
+                    padding=8,
+                    content=img_ctrl,
+                ),
+                ft.Container(
+                    content=badge,
+                    left=10,
+                    top=10,
+                ),
+            ],
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
+
+        stock_row = ft.Row(
+            [
+                ft.Icon(
+                    ft.Icons.CHECK_CIRCLE if stock_ok else ft.Icons.CANCEL_OUTLINED,
+                    size=14,
+                    color=ft.Colors.GREEN_700 if stock_ok else ft.Colors.RED_700,
+                ),
+                ft.Text(
+                    "В наличии" if stock_ok else "Нет в наличии",
+                    size=11,
+                    color=UI_MUTED,
+                ),
+            ],
+            spacing=4,
+            tight=True,
+        )
+
+        price_children: list[ft.Control] = []
+        if show_old and old_val is not None:
+            price_children.append(
+                ft.Row(
                     [
-                        ft.Row(
-                            [
-                                ft.Container(
-                                    content=ft.Text(
-                                        badge_text,
-                                        size=9,
-                                        color=UI_TEXT,
-                                        weight=ft.FontWeight.W_600,
-                                    ),
-                                    bgcolor=UI_ICON_BADGE_BG,
-                                    border_radius=999,
-                                    padding=ft.Padding.symmetric(horizontal=6, vertical=2),
-                                ),
-                                ft.Container(expand=True),
-                                ft.Icon(
-                                    ft.Icons.SCALE_OUTLINED if must_weigh else ft.Icons.SHOPPING_BAG_OUTLINED,
-                                    size=14,
-                                    color=UI_ACCENT_DIM,
-                                ),
-                            ],
-                            spacing=4,
-                        ),
                         ft.Text(
-                            title,
+                            f"{_money(old_val)}{unit_suffix}",
                             size=11,
-                            color=UI_TEXT,
-                            weight=ft.FontWeight.W_600,
-                            max_lines=3,
-                            overflow=ft.TextOverflow.ELLIPSIS,
+                            color=UI_MUTED,
+                            style=ft.TextStyle(decoration=ft.TextDecoration.LINE_THROUGH),
                         ),
-                        ft.Container(expand=True),
-                        ft.Text(
-                            sub_price,
-                            size=10,
-                            color=UI_ACCENT,
-                            weight=ft.FontWeight.W_500,
-                            max_lines=1,
-                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ft.Container(width=6),
+                        ft.Container(
+                            bgcolor=UI_ACCENT,
+                            border_radius=6,
+                            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                            content=ft.Text(
+                                f"−{disc_pct}%" if disc_pct > 0 else "−%",
+                                size=10,
+                                weight=ft.FontWeight.W_700,
+                                color=UI_TEXT_ON_YELLOW,
+                            ),
                         ),
                     ],
-                    spacing=4,
-                    expand=True,
-                ),
+                    spacing=0,
+                    tight=True,
+                )
+            )
+        price_children.append(
+            ft.Text(
+                price_line,
+                size=18,
+                weight=ft.FontWeight.W_800,
+                color=UI_TEXT,
+                max_lines=1,
+                overflow=ft.TextOverflow.ELLIPSIS,
+            )
+        )
+
+        def on_pick(_e):
+            pick_product_from_search(p)
+
+        return ft.Container(
+            expand=True,
+            bgcolor=UI_SURFACE,
+            border_radius=16,
+            border=ft.Border.all(1, UI_BORDER),
+            shadow=ft.BoxShadow(
+                blur_radius=10,
+                spread_radius=0,
+                color=ft.Colors.with_opacity(0.08, "#000000"),
+                offset=ft.Offset(0, 2),
+            ),
+            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+            ink=True,
+            on_click=on_pick,
+            content=ft.Column(
+                [
+                    ft.Container(height=img_h, content=img_stack, clip_behavior=ft.ClipBehavior.HARD_EDGE),
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                        content=ft.Column(
+                            [
+                                ft.Text(
+                                    title,
+                                    size=13,
+                                    weight=ft.FontWeight.W_600,
+                                    color=UI_CATALOG_TITLE,
+                                    max_lines=2,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                ),
+                                stock_row,
+                                ft.Column(price_children, spacing=4, tight=True),
+                            ],
+                            spacing=6,
+                            tight=True,
+                            horizontal_alignment=ft.CrossAxisAlignment.START,
+                        ),
+                    ),
+                ],
+                spacing=0,
+                tight=True,
             ),
         )
 
@@ -2118,7 +3146,7 @@ def main(page: ft.Page):
                     ft.Container(content=_build_search_product_card(item), expand=1)
                     for item in chunk
                 ]
-                col.controls.append(ft.Row(row_controls, spacing=6))
+                col.controls.append(ft.Row(row_controls, spacing=8))
                 chunk = []
         if chunk:
             row_controls = [
@@ -2127,7 +3155,7 @@ def main(page: ft.Page):
             ]
             while len(row_controls) < PRODUCT_GRID_COLUMNS:
                 row_controls.append(ft.Container(expand=1))
-            col.controls.append(ft.Row(row_controls, spacing=6))
+            col.controls.append(ft.Row(row_controls, spacing=8))
 
     def _render_quick_catalog(
         products: list | None = None,
@@ -2141,10 +3169,24 @@ def main(page: ft.Page):
         active_tab = str(tab or session.get("quick_catalog_tab") or "kg")
         all_products = session.get("quick_catalog_products") or {}
         items = products if products is not None else (all_products.get(active_tab) or [])
+        tc = session.setdefault("product_thumb_cache", {})
+        for it in items:
+            if isinstance(it, dict):
+                ip = str(it.get("id") or "").strip()
+                if ip and isinstance(tc.get(ip), str):
+                    it["_display_image"] = tc[ip]
         col.controls.clear()
         if not items:
             loading = bool((session.get("quick_catalog_loading") or {}).get(active_tab))
-            hint = "Загружаю товары..." if loading else "Быстрые товары ещё не загружены."
+            loaded = bool((session.get("quick_catalog_loaded") or {}).get(active_tab))
+            if loading:
+                hint = "Загружаю товары..."
+            elif loaded:
+                hint = (
+                    "Нет товаров для этой вкладки. Проверьте каталог API или переключите «Обычные»."
+                )
+            else:
+                hint = "Быстрые товары ещё не загружены."
             col.controls.append(
                 ft.Container(
                     content=ft.Text(hint, color=UI_MUTED, size=12),
@@ -2171,99 +3213,170 @@ def main(page: ft.Page):
             return
 
         loading_map[tab] = True
-        q_before = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
-        if len(q_before) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
-            _render_quick_catalog(products_map.get(tab) or [], tab)
-
-        cache_pool = [
-            dict(p)
-            for p in local_products_cache.get_cached_products(
-                client.active_branch_id,
-                kg_only=False,
-                limit=QUICK_CATALOG_LIMIT * 8,
-            )
-            if isinstance(p, dict)
-        ]
-        cache_pool = [p for p in cache_pool if _quick_catalog_matches_tab(p, tab)]
-
-        presets = QUICK_CATALOG_PRESETS.get(tab, ())
-        resolved: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
-        unresolved: list[tuple[str, tuple[str, ...]]] = []
-
-        for spec in presets:
-            found = _pick_quick_catalog_match(spec, cache_pool, tab)
-            if found:
-                pid = str(found.get("id") or "").strip()
-                if pid and pid not in seen_ids:
-                    resolved.append(found)
-                    seen_ids.add(pid)
-            else:
-                unresolved.append(spec)
-
-        merged_pool: list[dict[str, Any]] = list(cache_pool)
         try:
-            for spec in unresolved:
-                found: dict[str, Any] | None = None
-                for query in spec[1]:
-                    try:
-                        rows = await asyncio.to_thread(client.products_search, query, 20)
-                    except ApiError:
-                        continue
-                    ready_rows = [
-                        dict(p)
-                        for p in rows
-                        if isinstance(p, dict) and p.get("id") and _quick_catalog_matches_tab(p, tab)
-                    ]
-                    if not ready_rows:
-                        continue
-                    merged_pool.extend(ready_rows)
-                    try:
-                        local_products_cache.ingest_product_list(client.active_branch_id, ready_rows)
-                    except Exception:
-                        pass
-                    found = _pick_quick_catalog_match(spec, ready_rows + merged_pool, tab)
-                    if found:
-                        break
+            q_before = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+            if len(q_before) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
+                _render_quick_catalog(products_map.get(tab) or [], tab)
+
+            _bid = client.active_branch_id
+
+            def _sync_cache_pool():
+                rows = [
+                    dict(p)
+                    for p in local_products_cache.get_cached_products(
+                        _bid,
+                        kg_only=False,
+                        limit=QUICK_CATALOG_LIMIT * 8,
+                    )
+                    if isinstance(p, dict)
+                ]
+                return [p for p in rows if _quick_catalog_matches_tab(p, tab)]
+
+            cache_pool = await asyncio.to_thread(_sync_cache_pool)
+            if is_offline_mode():
+                products_map[tab] = _sort_quick_catalog_products(
+                    cache_pool, tab, QUICK_CATALOG_LIMIT
+                )
+                loaded_map[tab] = True
+                q_after = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+                if len(q_after) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
+                    _render_quick_catalog(products_map.get(tab) or [], tab)
+                if client.access and products_map.get(tab):
+                    page.run_task(_hydrate_product_thumbs, products_map[tab], f"c:{tab}")
+                return
+
+            presets = QUICK_CATALOG_PRESETS.get(tab, ())
+            merged_pool: list[dict[str, Any]] = [dict(p) for p in cache_pool]
+
+            async def safe_search(q: str):
+                try:
+                    return await asyncio.to_thread(client.products_search, q, 20)
+                except (ApiError, requests.exceptions.RequestException):
+                    return []
+
+            try:
+                catalog_rows = await asyncio.to_thread(
+                    client.products_catalog,
+                    QUICK_CATALOG_CATALOG_ITEMS_CAP,
+                    QUICK_CATALOG_CATALOG_MAX_PAGES,
+                )
+            except (ApiError, requests.exceptions.RequestException):
+                catalog_rows = []
+            ready_catalog = [
+                dict(p)
+                for p in catalog_rows
+                if isinstance(p, dict) and p.get("id") and _quick_catalog_matches_tab(p, tab)
+            ]
+            if ready_catalog:
+                merged_pool.extend(ready_catalog)
+                try:
+                    local_products_cache.ingest_product_list(
+                        client.active_branch_id, ready_catalog
+                    )
+                except Exception:
+                    pass
+
+            resolved: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            unresolved: list[tuple[str, tuple[str, ...]]] = []
+
+            for spec in presets:
+                found = _pick_quick_catalog_match(spec, merged_pool, tab)
                 if found:
                     pid = str(found.get("id") or "").strip()
                     if pid and pid not in seen_ids:
                         resolved.append(found)
                         seen_ids.add(pid)
+                else:
+                    unresolved.append(spec)
 
-            if len(resolved) < QUICK_CATALOG_LIMIT:
-                try:
-                    catalog_rows = await asyncio.to_thread(
-                        client.products_catalog,
-                        QUICK_CATALOG_LIMIT * 6,
-                        8,
+            if unresolved:
+
+                pairs = [(spec, spec[1][0]) for spec in unresolved if spec[1]]
+                if pairs:
+                    rows_list = await asyncio.gather(
+                        *(safe_search(q) for _, q in pairs)
                     )
-                except ApiError:
-                    catalog_rows = []
-                ready_catalog = [
-                    dict(p)
-                    for p in catalog_rows
-                    if isinstance(p, dict) and p.get("id") and _quick_catalog_matches_tab(p, tab)
-                ]
-                if ready_catalog:
-                    merged_pool.extend(ready_catalog)
-                    try:
-                        local_products_cache.ingest_product_list(client.active_branch_id, ready_catalog)
-                    except Exception:
-                        pass
+                    for rows in rows_list:
+                        if not isinstance(rows, list):
+                            continue
+                        ready_rows = [
+                            dict(p)
+                            for p in rows
+                            if isinstance(p, dict)
+                            and p.get("id")
+                            and _quick_catalog_matches_tab(p, tab)
+                        ]
+                        if ready_rows:
+                            merged_pool.extend(ready_rows)
+                            try:
+                                local_products_cache.ingest_product_list(
+                                    client.active_branch_id, ready_rows
+                                )
+                            except Exception:
+                                pass
 
-            remainder = _sort_quick_catalog_products(merged_pool, tab, QUICK_CATALOG_LIMIT * 3)
-            final = resolved + [p for p in remainder if str(p.get("id") or "").strip() not in seen_ids]
+                for spec in unresolved:
+                    found2 = _pick_quick_catalog_match(spec, merged_pool, tab)
+                    if found2:
+                        pid = str(found2.get("id") or "").strip()
+                        if pid and pid not in seen_ids:
+                            resolved.append(found2)
+                            seen_ids.add(pid)
+                            continue
+                    q_iter = spec[1][1:] if found2 else spec[1]
+                    for query in q_iter:
+                        try:
+                            rows = await asyncio.to_thread(
+                                client.products_search, query, 20
+                            )
+                        except (ApiError, requests.exceptions.RequestException):
+                            continue
+                        ready_rows = [
+                            dict(p)
+                            for p in rows
+                            if isinstance(p, dict)
+                            and p.get("id")
+                            and _quick_catalog_matches_tab(p, tab)
+                        ]
+                        if not ready_rows:
+                            continue
+                        merged_pool.extend(ready_rows)
+                        try:
+                            local_products_cache.ingest_product_list(
+                                client.active_branch_id, ready_rows
+                            )
+                        except Exception:
+                            pass
+                        found3 = _pick_quick_catalog_match(spec, merged_pool, tab)
+                        if found3:
+                            pid = str(found3.get("id") or "").strip()
+                            if pid and pid not in seen_ids:
+                                resolved.append(found3)
+                                seen_ids.add(pid)
+                            break
+
+            remainder = _sort_quick_catalog_products(
+                merged_pool, tab, QUICK_CATALOG_LIMIT * 3
+            )
+            final = resolved + [
+                p for p in remainder if str(p.get("id") or "").strip() not in seen_ids
+            ]
             products_map[tab] = final[:QUICK_CATALOG_LIMIT]
             loaded_map[tab] = True
 
             q_after = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
             if len(q_after) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
                 _render_quick_catalog(products_map.get(tab) or [], tab)
+            if client.access and products_map.get(tab):
+                page.run_task(_hydrate_product_thumbs, products_map[tab], f"c:{tab}")
         finally:
             loading_map[tab] = False
+            q_fin = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+            if len(q_fin) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
+                _render_quick_catalog(products_map.get(tab) or [], tab)
 
-    def _fill_search_results(products: list):
+    def _fill_search_results(products: list, *, search_q: str | None = None):
         col = search_results_ref.current
         if not col:
             return
@@ -2274,7 +3387,15 @@ def main(page: ft.Page):
         valid_products = [
             p for p in products if isinstance(p, dict) and p.get("id")
         ]
+        tc = session.setdefault("product_thumb_cache", {})
+        for it in valid_products:
+            ip = str(it.get("id") or "").strip()
+            if ip and isinstance(tc.get(ip), str):
+                it["_display_image"] = tc[ip]
         _append_products_grid(col, valid_products)
+        sq = (search_q or "").strip()
+        if sq and len(sq) >= 2 and client.access:
+            page.run_task(_hydrate_product_thumbs, valid_products, f"s:{sq}")
 
     def _do_search(q: str, silent: bool = False):
         q = (q or "").strip()
@@ -2307,6 +3428,15 @@ def main(page: ft.Page):
                 snack("Сначала начните продажу", ft.Colors.AMBER_700)
             page.update()
             return
+        if is_offline_mode():
+            products = offline_pos.search_products(client.active_branch_id, q, limit=40)
+            _fill_search_results(products, search_q=q)
+            if not products and not silent:
+                show_error(
+                    "В локальной базе ничего не найдено. Подключите интернет для обновления каталога."
+                )
+            page.update()
+            return
 
         async def _search_task():
             set_loading(True)
@@ -2319,9 +3449,34 @@ def main(page: ft.Page):
                     )
                 except Exception:
                     pass
-                _fill_search_results(products)
+                _fill_search_results(products, search_q=q)
                 page.update()
+            except requests.exceptions.RequestException:
+                if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                    products = offline_pos.search_products(client.active_branch_id, q, limit=40)
+                    _fill_search_results(products, search_q=q)
+                    show_error(
+                        ""
+                        if products
+                        else "Сеть недоступна. Показаны только товары из локальной базы."
+                    )
+                    page.update()
+                else:
+                    show_error("Нет сети. Локальная офлайн-сессия недоступна.")
+                    snack("Нет сети. Офлайн-сессия недоступна.", ft.Colors.RED_700)
             except ApiError as ex:
+                if ex.status_code == 404:
+                    products = offline_pos.search_products(client.active_branch_id, q, limit=40)
+                    _fill_search_results(products, search_q=q)
+                    show_error(
+                        ""
+                        if products
+                        else "Поиск на сервере временно недоступен. Показаны только товары из локальной базы."
+                    )
+                    if not products:
+                        snack("Поиск на сервере временно недоступен.", ft.Colors.AMBER_700)
+                    page.update()
+                    return
                 show_error(str(ex))
                 snack(str(ex), ft.Colors.RED_700)
             finally:
@@ -2365,7 +3520,216 @@ def main(page: ft.Page):
         q = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
         if len(q) < 2:
             _render_quick_catalog(tab=selected)
+            loaded = (session.get("quick_catalog_loaded") or {}).get(selected)
+            prods = session.get("quick_catalog_products") or {}
+            if loaded and prods.get(selected):
+                return
             page.run_task(_load_quick_catalog, selected, False)
+
+    def open_sync_status_dlg(_=None):
+        sync_body_ref = ft.Ref[ft.Column]()
+
+        def _build_sync_status_items() -> list[ft.Control]:
+            stats = offline_store.get_sync_stats()
+            rows = offline_store.list_sync_queue(limit=20)
+            out: list[ft.Control] = [
+                ft.Text(
+                    f"Режим кассы: {'Офлайн' if is_offline_mode() else 'Онлайн'}",
+                    size=13,
+                    color=UI_TEXT,
+                ),
+                ft.Text(
+                    f"Ожидают: {stats.get('pending', 0)}  ·  Ошибки: {stats.get('failed', 0)}  ·  В работе: {stats.get('syncing', 0)}",
+                    size=12,
+                    color=UI_MUTED,
+                ),
+                ft.Divider(height=12, color=UI_BORDER),
+                ft.Text(
+                    "Удалить — только с этой кассы, если продажа уже учтена вручную или строка лишняя.",
+                    size=10,
+                    color=UI_MUTED,
+                ),
+            ]
+            if not rows:
+                out.append(ft.Text("Очередь синхронизации пуста.", size=12, color=UI_MUTED))
+            else:
+                for row in rows:
+                    st = str(row.get("status") or "pending")
+                    suffix = ""
+                    if row.get("server_sale_id"):
+                        suffix = f" -> {str(row.get('server_sale_id'))[:8]}…"
+                    err = str(row.get("last_error") or "").strip()
+                    sale_id_full = str(row.get("sale_local_id") or "").strip()
+
+                    def _discard_click(_e, sid: str = sale_id_full):
+                        if not sid:
+                            return
+                        if offline_store.discard_offline_sale_sync(sid):
+                            snack("Запись удалена с этой кассы.", ft.Colors.GREEN_700)
+                        else:
+                            snack("Не удалось удалить запись.", ft.Colors.RED_700)
+                        _refresh_sync_dialog_body()
+                        refresh_pos_mode_ui(flush=True)
+
+                    text_col = ft.Column(
+                        [
+                            ft.Text(
+                                f"{sale_id_full[:18]}…  {st}{suffix}" if sale_id_full else f"—  {st}{suffix}",
+                                size=12,
+                                color=UI_TEXT,
+                            ),
+                            ft.Text(
+                                f"{row.get('total')} сом · {row.get('payment_method') or 'cash'} · попыток {row.get('attempts') or 0}",
+                                size=11,
+                                color=UI_MUTED,
+                            ),
+                            ft.Text(
+                                err or "Без ошибок",
+                                size=10,
+                                color=UI_WARN_TEXT if err else UI_MUTED,
+                            ),
+                        ],
+                        tight=True,
+                        spacing=2,
+                        expand=True,
+                    )
+                    out.append(
+                        ft.Container(
+                            content=ft.Row(
+                                [
+                                    text_col,
+                                    ft.IconButton(
+                                        ft.Icons.DELETE_OUTLINE,
+                                        icon_size=22,
+                                        tooltip="Удалить из очереди на этой кассе",
+                                        on_click=_discard_click,
+                                    ),
+                                ],
+                                alignment=ft.MainAxisAlignment.START,
+                                vertical_alignment=ft.CrossAxisAlignment.START,
+                            ),
+                            padding=ft.Padding.symmetric(horizontal=4, vertical=8),
+                            bgcolor=UI_SURFACE_ELEV,
+                            border_radius=10,
+                            border=ft.Border.all(1, UI_BORDER),
+                        )
+                    )
+            return out
+
+        def _refresh_sync_dialog_body():
+            col = sync_body_ref.current
+            if not col:
+                return
+            col.controls.clear()
+            col.controls.extend(_build_sync_status_items())
+            try:
+                page.update()
+            except RuntimeError:
+                pass
+
+        def on_reload_sync_dlg(_):
+            _refresh_sync_dialog_body()
+            refresh_pos_mode_ui(flush=True)
+
+        def on_retry_failed_sync(_):
+            n = offline_store.retry_failed_sync_queue()
+            if n:
+                snack(f"В очередь возвращено продаж: {n}", ft.Colors.AMBER_700)
+            else:
+                snack("Нет записей со статусом «ошибка».", ft.Colors.BLUE_GREY_400)
+            _refresh_sync_dialog_body()
+            refresh_pos_mode_ui(flush=False)
+
+            async def _run_sync_after_retry():
+                try:
+                    await asyncio.to_thread(offline_pos.sync_pending_sales, client, limit=20)
+                except Exception:
+                    pass
+                _refresh_sync_dialog_body()
+                refresh_pos_mode_ui(flush=True)
+
+            page.run_task(_run_sync_after_retry)
+
+        body_col = ft.Column(
+            ref=sync_body_ref,
+            controls=_build_sync_status_items(),
+            tight=True,
+            spacing=8,
+            scroll=ft.ScrollMode.AUTO,
+        )
+        dlg = ft.AlertDialog(
+            modal=True,
+            bgcolor=UI_SURFACE,
+            shape=ft.RoundedRectangleBorder(radius=16),
+            title=ft.Text("Синхронизация офлайн-продаж", color=UI_TEXT, weight=ft.FontWeight.W_600),
+            content=ft.Container(
+                content=body_col,
+                width=520,
+                height=380,
+            ),
+            actions=[
+                ft.TextButton("Перезагрузить", on_click=on_reload_sync_dlg),
+                ft.FilledButton("Повторить", on_click=on_retry_failed_sync),
+                ft.TextButton("Закрыть", on_click=dismiss_dialog),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        _show_modal_dialog(dlg)
+
+    async def _offline_sync_loop(sync_generation: int):
+        while (
+            session.get("cashier_active")
+            and int(session.get("sync_generation") or 0) == int(sync_generation)
+        ):
+            refresh_pos_mode_ui(flush=False)
+            stats = offline_store.get_sync_stats()
+            reachable = client.can_reach_api()
+            has_session = bool(client.access)
+            if reachable and not has_session:
+                restored = _restore_offline_session(_current_user_email() or None)
+                has_session = bool(client.access) if restored else False
+            was_reachable = bool(session.get("api_reachable"))
+            session["api_reachable"] = reachable
+            pending_now = int(stats.get("pending") or 0)
+            failed_now = int(stats.get("failed") or 0)
+            if reachable:
+                if not has_session:
+                    set_pos_mode("online", "нужен вход", flush=False)
+                elif pending_now > 0 and not session.get("sync_running"):
+                    set_pos_mode("online", "синхронизация", flush=False)
+                elif failed_now > 0 and not session.get("sync_running"):
+                    set_pos_mode("online", "ошибки синка", flush=False)
+                else:
+                    set_pos_mode("online", "сеть восстановлена" if not was_reachable else "", flush=False)
+            if (
+                reachable
+                and has_session
+                and not session.get("sync_running")
+                and (pending_now > 0 or failed_now > 0)
+            ):
+                session["sync_running"] = True
+                try:
+                    await asyncio.to_thread(offline_pos.sync_pending_sales, client, limit=10)
+                    stats = offline_store.get_sync_stats()
+                    pending_left = int(stats.get("pending") or 0)
+                    failed_left = int(stats.get("failed") or 0)
+                    if pending_left == 0 and failed_left == 0:
+                        set_pos_mode("online", "сеть восстановлена", flush=False)
+                    elif pending_left > 0:
+                        set_pos_mode("online", "синхронизация", flush=False)
+                    elif failed_left > 0:
+                        set_pos_mode("online", "ошибки синка", flush=False)
+                    _persist_offline_session()
+                except requests.exceptions.RequestException:
+                    session["api_reachable"] = False
+                    set_pos_mode("offline", "нет сети", flush=False)
+                    pass
+                except Exception:
+                    pass
+                finally:
+                    session["sync_running"] = False
+            refresh_pos_mode_ui(flush=True)
+            await asyncio.sleep(OFFLINE_SYNC_POLL_SEC)
 
     def open_shift_dlg(_):
         async def _load_and_show():
@@ -2445,6 +3809,7 @@ def main(page: ft.Page):
                         new_sid = _shift_id_from_open_response(res)
                         if new_sid:
                             session["active_shift_id"] = new_sid
+                        _persist_offline_session()
                         dismiss_dialog()
                         snack("Смена открыта", ft.Colors.GREEN_700)
                         try_start_sale()
@@ -2474,11 +3839,21 @@ def main(page: ft.Page):
                     ),
                 ],
             )
-            page.show_dialog(dlg)
+            _show_modal_dialog(dlg)
 
         page.run_task(_load_and_show)
 
     def close_shift_click(_):
+        if is_offline_mode():
+            offline_pos.close_shift(
+                user_payload=dict(client.user_payload or {}),
+                branch_id=client.active_branch_id,
+            )
+            session["active_shift_id"] = None
+            snack("Локальная смена закрыта. Продажи ждут синхронизации.", ft.Colors.GREEN_700)
+            refresh_pos_mode_ui(flush=True)
+            return
+
         async def _resolve_and_show():
             cart = session.get("cart") or {}
             sid = _resolve_shift_id(session, cart)
@@ -2518,6 +3893,7 @@ def main(page: ft.Page):
                         session["active_shift_id"] = None
                         session["cart_id"] = None
                         session["cart"] = {}
+                        _persist_offline_session()
                         render_cart_items()
                         snack("Смена закрыта", ft.Colors.GREEN_700)
                     except ApiError as ex:
@@ -2542,7 +3918,7 @@ def main(page: ft.Page):
                     ),
                 ],
             )
-            page.show_dialog(dlg)
+            _show_modal_dialog(dlg)
 
         page.run_task(_resolve_and_show)
 
@@ -2639,6 +4015,49 @@ def main(page: ft.Page):
             cid_pay = cid_key
             cash_recv = normalize_decimal_string(cash_in.value) if pm == "cash" else None
 
+            if is_offline_mode():
+                try:
+                    sale = offline_pos.checkout(
+                        cart_id=str(cid_pay),
+                        payment_method=pm,
+                        cash_received=cash_recv,
+                    )
+                except OfflinePosError as ex:
+                    set_checkout_pay_msg(str(ex))
+                    snack(str(ex), ft.Colors.RED_700)
+                    return
+                dismiss_dialog()
+                change_value = sale.get("change_amount")
+                sale_local_id = sale.get("sale_local_id")
+                msg = (
+                    f"Офлайн-оплата проведена. Сдача: {_money(change_value)} сом"
+                    if change_value is not None
+                    else "Офлайн-оплата проведена"
+                )
+                if sale_local_id:
+                    msg += f" (чек {str(sale_local_id)[:8]}…)"
+                snack(msg, ft.Colors.GREEN_700)
+                if want_print:
+                    try:
+                        print_sale_receipt(
+                            cart=cart_snapshot,
+                            payment_method=pm,
+                            cash_received=cash_recv,
+                            change_amount=change_value,
+                            sale_id=sale_local_id,
+                            company=receipt_company,
+                            cashier=receipt_cashier,
+                        )
+                    except ReceiptPrinterError as ex:
+                        snack(f"Чек не напечатан: {ex}", ft.Colors.AMBER_700)
+                    except Exception as ex:
+                        snack(f"Печать чека: {ex}", ft.Colors.AMBER_700)
+                session["cart_id"] = None
+                session["cart"] = {}
+                refresh_pos_mode_ui(flush=False)
+                try_start_sale()
+                return
+
             async def _checkout_async():
                 set_loading(True)
                 page.update()
@@ -2663,6 +4082,7 @@ def main(page: ft.Page):
                 dismiss_dialog()
                 ch = _checkout_change_amount(res)
                 sale_id = _checkout_sale_id(res)
+                _persist_offline_session()
                 msg = f"Оплата прошла. Сдача: {_money(ch)} сом" if ch is not None else "Оплата прошла"
                 if sale_id:
                     msg += f" (продажа {str(sale_id)[:8]}…)"
@@ -2827,7 +4247,7 @@ def main(page: ft.Page):
             actions_alignment=ft.MainAxisAlignment.END,
             actions_padding=ft.Padding.symmetric(horizontal=20, vertical=16),
         )
-        page.show_dialog(dlg)
+        _show_modal_dialog(dlg)
 
     def checkout_click(_):
         cid = session.get("cart_id")
@@ -2839,6 +4259,9 @@ def main(page: ft.Page):
         if not items:
             snack("Добавьте товары в чек", ft.Colors.AMBER_700)
             return
+        if is_offline_mode():
+            open_checkout_payment_dialog(cart, str(cid))
+            return
 
         async def _prep_checkout():
             set_loading(True)
@@ -2846,6 +4269,14 @@ def main(page: ft.Page):
                 fresh = await asyncio.to_thread(client.pos_cart_get, str(cid))
             except ApiError as ex:
                 snack(str(ex), ft.Colors.RED_700)
+                return
+            except requests.exceptions.RequestException:
+                if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                    fresh_local = session.get("cart") or {}
+                    set_loading(False)
+                    open_checkout_payment_dialog(fresh_local, str(session.get("cart_id") or cid))
+                    return
+                snack("Нет сети. Офлайн-сессия недоступна.", ft.Colors.RED_700)
                 return
             finally:
                 set_loading(False)
@@ -2921,11 +4352,22 @@ def main(page: ft.Page):
                     await asyncio.to_thread(
                         client.login, email.value.strip(), password.value
                     )
+                    set_pos_mode("online", "", flush=False)
+                    _persist_offline_session()
                     open_cashier()
                 except ApiError as ex:
                     show_error(str(ex))
                 except requests.exceptions.RequestException as ex:
-                    show_error(f"Сеть: {ex}")
+                    restored = _restore_offline_session(email.value.strip())
+                    if restored:
+                        set_pos_mode("offline", "без интернета", flush=False)
+                        open_cashier()
+                        snack(
+                            "Вход выполнен по последней успешной сессии. Касса работает офлайн.",
+                            ft.Colors.AMBER_700,
+                        )
+                    else:
+                        show_error(f"Сеть: {ex}")
                 finally:
                     set_loading(False)
 
@@ -3028,6 +4470,8 @@ def main(page: ft.Page):
     def open_cashier():
         hide_virtual_keyboard()
         session["cashier_active"] = True
+        session["sync_generation"] = int(session.get("sync_generation") or 0) + 1
+        session["sync_running"] = False
         session["barcode_buf"] = ""
         session["barcode_last_ms"] = 0.0
         session["quick_catalog_tab"] = "kg"
@@ -3039,6 +4483,7 @@ def main(page: ft.Page):
         page.add(build_cashier())
         page.window.prevent_close = True
         page.update()
+        refresh_pos_mode_ui(flush=False)
         _render_quick_catalog([], "kg")
         page.run_task(_load_quick_catalog, "kg", True)
         if scale_feature_enabled:
@@ -3056,6 +4501,7 @@ def main(page: ft.Page):
                 baudrate=config.SCALE_COM_BAUD,
             )
             scale_state["mgr"].start()
+        page.run_task(_offline_sync_loop, session["sync_generation"])
         try_start_sale()
 
     def logout(_):
@@ -3068,6 +4514,8 @@ def main(page: ft.Page):
                 pass
             scale_state["mgr"] = None
         session["cashier_active"] = False
+        session["sync_generation"] = int(session.get("sync_generation") or 0) + 1
+        session["sync_running"] = False
         session["barcode_buf"] = ""
         page.on_keyboard_event = None
         client.clear()
@@ -3076,6 +4524,8 @@ def main(page: ft.Page):
         session["needs_shift"] = False
         session["pos_cashbox_id"] = None
         session["active_shift_id"] = None
+        session["pos_mode"] = "online"
+        session["pos_mode_reason"] = ""
         page.controls.clear()
         page.window.prevent_close = False
         page.add(ft.Stack([build_login(), build_loading_overlay()], expand=True))
@@ -3255,7 +4705,7 @@ def main(page: ft.Page):
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        page.show_dialog(dlg)
+        _show_modal_dialog(dlg)
 
     def restart_scale_manager():
         if not scale_feature_enabled:
@@ -3438,7 +4888,7 @@ def main(page: ft.Page):
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        page.show_dialog(dlg)
+        _show_modal_dialog(dlg)
 
     def open_brand_settings_menu(_):
         def close_menu(_e=None):
@@ -3544,7 +4994,7 @@ def main(page: ft.Page):
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
-        page.show_dialog(dlg)
+        _show_modal_dialog(dlg)
 
     def build_loading_overlay() -> ft.Container:
         return ft.Container(
@@ -3557,6 +5007,45 @@ def main(page: ft.Page):
         )
 
     def build_cashier() -> ft.Stack:
+        _CASHIER_SPLIT_FLEX_SUM = 27
+
+        def _on_main_splitter_pan(e: Any) -> None:
+            ms = session["ui_pos"].setdefault(
+                "main_split",
+                {"left": 11, "right": 16, "left_frac": 11.0},
+            )
+            ms.setdefault("left_frac", float(ms.get("left", 11)))
+            dx, _ = _pan_delta_xy(e)
+            frac = float(ms["left_frac"]) + dx / 42.0
+            frac = max(6.0, min(21.0, frac))
+            nl = int(round(frac))
+            nr = _CASHIER_SPLIT_FLEX_SUM - nl
+            if nr < 6:
+                nr = 6
+                nl = _CASHIER_SPLIT_FLEX_SUM - nr
+                frac = float(nl)
+            ms["left_frac"] = frac
+            ms["left"], ms["right"] = nl, nr
+            lc = cashier_left_split_ref.current
+            rc = cashier_right_split_ref.current
+            if lc:
+                lc.expand = nl
+            if rc:
+                rc.expand = nr
+            try:
+                page.update()
+            except RuntimeError:
+                pass
+
+        def _on_main_splitter_pan_end(_e: Any = None) -> None:
+            ms = session["ui_pos"].get("main_split")
+            if ms is not None:
+                ms["left_frac"] = float(ms.get("left", 11))
+            try:
+                page.update()
+            except RuntimeError:
+                pass
+
         u = client.user_payload
         name = f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or u.get("email", "—")
         company = u.get("company") or "—"
@@ -3569,6 +5058,9 @@ def main(page: ft.Page):
 
             def on_branch(e):
                 client.active_branch_id = e.control.value
+                _persist_offline_session()
+                session.pop("product_detail_cache", None)
+                session.pop("product_detail_for_images", None)
                 session["quick_catalog_products"] = {"kg": [], "common": []}
                 session["quick_catalog_loading"] = {"kg": False, "common": False}
                 session["quick_catalog_loaded"] = {"kg": False, "common": False}
@@ -3648,7 +5140,7 @@ def main(page: ft.Page):
 
         search_results = ft.Column(
             ref=search_results_ref,
-            spacing=6,
+            spacing=5,
             scroll=ft.ScrollMode.AUTO,
         )
 
@@ -3709,7 +5201,7 @@ def main(page: ft.Page):
             bgcolor=UI_SURFACE_ELEV,
             border=ft.Border.all(1, UI_BORDER),
             border_radius=15,
-            padding=4,
+            padding=3,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
         )
 
@@ -3868,7 +5360,13 @@ def main(page: ft.Page):
                             ],
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
-                        ft.Text(ref=weight_scale_text, value="—", size=20, weight=ft.FontWeight.W_600, color=UI_TEXT),
+                        ft.Text(
+                            ref=weight_scale_text,
+                            value="—",
+                            size=20,
+                            weight=ft.FontWeight.W_600,
+                            color=UI_TEXT,
+                        ),
                         ft.Text(ref=weight_scale_status, value="", size=9, color=UI_MUTED),
                     ],
                     tight=True,
@@ -3898,14 +5396,25 @@ def main(page: ft.Page):
             ]
         )
 
+        _ms = session["ui_pos"].setdefault(
+            "main_split",
+            {"left": 11, "right": 16, "left_frac": 11.0},
+        )
+        _ms.setdefault("left_frac", float(_ms.get("left", 11)))
+        _lf = max(6, min(21, int(_ms.get("left", 11))))
+        _rf = max(6, _CASHIER_SPLIT_FLEX_SUM - _lf)
+        _ms["left"], _ms["right"] = _lf, _rf
+        _ms["left_frac"] = float(_lf)
+
         col_left = ft.Container(
+            ref=cashier_left_split_ref,
             content=ft.Column(
                 col_left_children,
                 expand=True,
                 spacing=8,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
-            expand=True,
+            expand=_lf,
             padding=12,
             bgcolor=UI_SURFACE,
             border_radius=15,
@@ -3913,7 +5422,7 @@ def main(page: ft.Page):
             shadow=_COLUMN_CARD_SHADOW,
         )
 
-        col_mid = ft.Container(
+        cart_section = ft.Container(
             content=ft.Column(
                 [
                     ft.Text(
@@ -3937,6 +5446,28 @@ def main(page: ft.Page):
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
             expand=True,
+            padding=0,
+            bgcolor="transparent",
+        )
+
+        receipt_section = ft.Container(
+            content=receipt,
+            padding=0,
+            bgcolor="transparent",
+        )
+
+        col_right = ft.Container(
+            ref=cashier_right_split_ref,
+            content=ft.Column(
+                [
+                    cart_section,
+                    receipt_section,
+                ],
+                expand=True,
+                spacing=10,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+            expand=_rf,
             padding=12,
             bgcolor=UI_SURFACE,
             border_radius=15,
@@ -3944,11 +5475,18 @@ def main(page: ft.Page):
             shadow=_COLUMN_CARD_SHADOW,
         )
 
-        col_pay = ft.Container(
-            content=receipt,
-            expand=True,
-            padding=0,
-            shadow=_COLUMN_CARD_SHADOW,
+        main_splitter = ft.GestureDetector(
+            mouse_cursor=ft.MouseCursor.RESIZE_LEFT_RIGHT,
+            drag_interval=0,
+            on_pan_update=_on_main_splitter_pan,
+            on_pan_end=_on_main_splitter_pan_end,
+            content=ft.Container(
+                width=6,
+                expand=True,
+                margin=ft.Margin.symmetric(horizontal=2),
+                bgcolor=UI_BORDER,
+                border_radius=3,
+            ),
         )
 
         _hdr_btns: list[ft.Control] = [
@@ -3974,6 +5512,22 @@ def main(page: ft.Page):
                 ),
                 on_click=close_shift_click,
             ),
+            ft.OutlinedButton(
+                content=ft.Row(
+                    [
+                        ft.Icon(ft.Icons.SYNC, size=16, color=UI_MUTED),
+                        ft.Text(ref=sync_status_ref, value="Синк: пусто", size=11, color=UI_MUTED),
+                    ],
+                    spacing=6,
+                    tight=True,
+                ),
+                style=ft.ButtonStyle(
+                    color=UI_MUTED,
+                    side=ft.BorderSide(1, UI_BORDER),
+                    shape=ft.RoundedRectangleBorder(radius=10),
+                ),
+                on_click=open_sync_status_dlg,
+            ),
         ]
         header_toolbar = ft.Row(_hdr_btns, spacing=8, tight=True)
 
@@ -3987,6 +5541,7 @@ def main(page: ft.Page):
                     color=UI_MUTED,
                 ),
                 ft.Text(company_short, size=10, color=UI_MUTED),
+                ft.Text(ref=pos_mode_ref, value="Онлайн", size=10, color=UI_MUTED),
                 branch_ctrl if branch_ctrl else ft.Container(),
             ],
             spacing=8,
@@ -4033,17 +5588,17 @@ def main(page: ft.Page):
             ),
         )
 
-        three_columns = ft.Row(
-            [col_left, col_mid, col_pay],
+        two_cards = ft.Row(
+            [col_left, main_splitter, col_right],
             expand=True,
-            spacing=10,
-            vertical_alignment=ft.CrossAxisAlignment.START,
+            spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
         )
         main_stack = ft.Column(
             [
                 header,
                 ft.Container(
-                    content=three_columns,
+                    content=two_cards,
                     expand=True,
                     padding=ft.Padding.symmetric(horizontal=8, vertical=10),
                     bgcolor=UI_BG,
@@ -4139,6 +5694,51 @@ def main(page: ft.Page):
     page.on_disconnect = _on_page_disconnect
 
     page.add(ft.Stack([build_login(), build_loading_overlay()], expand=True))
+
+    _vk0 = session["ui_pos"]["vk"]
+    _vk_l0 = float(_vk0["left"]) if _vk0.get("left") is not None else 0.0
+    _vk_b0 = float(_vk0["bottom"]) if _vk0.get("bottom") is not None else _VK_MARGIN
+    page.overlay.append(
+        ft.Stack(
+            [
+                ft.Container(
+                    ref=virtual_keyboard_host,
+                    visible=False,
+                    expand=True,
+                    ignore_interactions=True,
+                    margin=ft.Margin.only(bottom=6, left=6, right=6),
+                    on_size_change=_vk_on_host_size,
+                ),
+                ft.Stack(
+                    expand=True,
+                    controls=[
+                        ft.Container(
+                            ref=vk_panel_inner_ref,
+                            visible=False,
+                            left=_vk_l0,
+                            bottom=_vk_b0,
+                            width=_VK_PANEL_WIDTH,
+                            bgcolor=UI_SIDEBAR,
+                            border_radius=12,
+                            padding=8,
+                            border=ft.Border.all(1, "#1f2937"),
+                            shadow=ft.BoxShadow(
+                                blur_radius=12,
+                                spread_radius=1,
+                                color=ft.Colors.with_opacity(0.20, "#000000"),
+                                offset=ft.Offset(0, 4),
+                            ),
+                            clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                            content=ft.Column(
+                                ref=virtual_keyboard_body, spacing=4, tight=True
+                            ),
+                        ),
+                    ],
+                ),
+            ],
+            expand=True,
+        )
+    )
 
     if sys.platform == "win32":
 

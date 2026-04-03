@@ -14,6 +14,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from config import API_BASE_URL
+from product_media import product_image_url
+
 
 _lock = threading.Lock()
 _schema_ready = False
@@ -181,16 +184,17 @@ def upsert_row(
             _ensure_schema(c)
             c.execute(
                 """
-                INSERT INTO products (branch_id, barcode, product_id, name, price, unit, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO products (branch_id, barcode, product_id, name, price, unit, image_url, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(branch_id, barcode) DO UPDATE SET
                     product_id = excluded.product_id,
                     name = COALESCE(excluded.name, products.name),
                     price = COALESCE(excluded.price, products.price),
                     unit = COALESCE(excluded.unit, products.unit),
+                    image_url = COALESCE(NULLIF(TRIM(excluded.image_url), ''), products.image_url),
                     updated_at = excluded.updated_at
                 """,
-                (bk, bc, pid, name, price, unit, now),
+                (bk, bc, pid, name, price, unit, image_url, now),
             )
         finally:
             c.close()
@@ -214,8 +218,14 @@ def get_cached_scan_row(branch_id: str | None, barcode: str) -> dict[str, Any] |
         try:
             _ensure_schema(c)
             row = c.execute(
-                "SELECT product_id, unit FROM products WHERE branch_id = ? AND barcode = ?",
-                (bk, bc),
+                """
+                SELECT product_id, unit
+                FROM products
+                WHERE barcode = ? AND branch_id IN (?, '')
+                ORDER BY CASE WHEN branch_id = ? THEN 0 ELSE 1 END, updated_at DESC
+                LIMIT 1
+                """,
+                (bc, bk, bk),
             ).fetchone()
             if not row:
                 return None
@@ -246,12 +256,12 @@ def get_cached_products(
             _ensure_schema(c)
             rows = c.execute(
                 """
-                SELECT product_id, name, price, unit, updated_at
+                SELECT product_id, barcode, name, price, unit, updated_at, branch_id
                 FROM products
-                WHERE branch_id = ?
-                ORDER BY updated_at DESC
+                WHERE branch_id IN (?, '')
+                ORDER BY CASE WHEN branch_id = ? THEN 0 ELSE 1 END, updated_at DESC
                 """,
-                (bk,),
+                (bk, bk),
             ).fetchall()
         except sqlite3.Error:
             return []
@@ -273,19 +283,158 @@ def get_cached_products(
         seen.add(pid_s)
         name = row["name"]
         price = row["price"]
-        out.append(
-            {
-                "id": pid_s,
-                "name": str(name).strip() if name is not None and str(name).strip() else f"Товар #{pid_s}",
-                "price": str(price).strip() if price is not None and str(price).strip() else "",
-                "unit": unit_s,
-                "is_weight": is_kg,
-                "updated_at": row["updated_at"],
-            }
-        )
+        barcode = row["barcode"]
+        img = row["image_url"] if "image_url" in row.keys() else None
+        img_s = str(img).strip() if img is not None and str(img).strip() else None
+        row_d: dict[str, Any] = {
+            "id": pid_s,
+            "barcode": str(barcode).strip() if barcode is not None and str(barcode).strip() else None,
+            "name": str(name).strip() if name is not None and str(name).strip() else f"Товар #{pid_s}",
+            "price": str(price).strip() if price is not None and str(price).strip() else "",
+            "unit": unit_s,
+            "is_weight": is_kg,
+            "updated_at": row["updated_at"],
+        }
+        if img_s:
+            row_d["image_url"] = img_s
+        out.append(row_d)
         if len(out) >= max(1, int(limit)):
             break
     return out
+
+
+def get_cached_product_by_barcode(
+    branch_id: str | None,
+    barcode: str,
+) -> dict[str, Any] | None:
+    if not _enabled():
+        return None
+    bc = _norm_barcode(barcode)
+    if not bc:
+        return None
+    bk = _branch_key(branch_id)
+    with _lock:
+        c = _connect()
+        try:
+            _ensure_schema(c)
+            row = c.execute(
+                """
+                SELECT product_id, barcode, name, price, unit, updated_at
+                FROM products
+                WHERE barcode = ? AND branch_id IN (?, '')
+                ORDER BY CASE WHEN branch_id = ? THEN 0 ELSE 1 END, updated_at DESC
+                LIMIT 1
+                """,
+                (bc, bk, bk),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        finally:
+            c.close()
+    if not row:
+        return None
+    pid = str(row["product_id"]).strip() if row["product_id"] is not None else ""
+    if not pid:
+        return None
+    unit = row["unit"]
+    unit_s = str(unit).strip() if unit is not None and str(unit).strip() else None
+    name = row["name"]
+    price = row["price"]
+    return {
+        "id": pid,
+        "product_id": pid,
+        "barcode": bc,
+        "name": str(name).strip() if name is not None and str(name).strip() else f"Товар #{pid}",
+        "price": str(price).strip() if price is not None and str(price).strip() else "",
+        "unit": unit_s,
+        "is_weight": _unit_is_kg_value(unit_s),
+        "updated_at": row["updated_at"],
+    }
+
+
+def get_cached_product_by_id(
+    branch_id: str | None,
+    product_id: str,
+) -> dict[str, Any] | None:
+    if not _enabled():
+        return None
+    pid = str(product_id or "").strip()
+    if not pid:
+        return None
+    bk = _branch_key(branch_id)
+    with _lock:
+        c = _connect()
+        try:
+            _ensure_schema(c)
+            rows = c.execute(
+                """
+                SELECT product_id, barcode, name, price, unit, updated_at
+                FROM products
+                WHERE product_id = ? AND branch_id IN (?, '')
+                ORDER BY CASE WHEN branch_id = ? THEN 0 ELSE 1 END, updated_at DESC
+                LIMIT 1
+                """,
+                (pid, bk, bk),
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        finally:
+            c.close()
+    if not rows:
+        return None
+    row = rows[0]
+    unit = row["unit"]
+    unit_s = str(unit).strip() if unit is not None and str(unit).strip() else None
+    name = row["name"]
+    price = row["price"]
+    barcode = row["barcode"]
+    return {
+        "id": pid,
+        "product_id": pid,
+        "barcode": str(barcode).strip() if barcode is not None and str(barcode).strip() else None,
+        "name": str(name).strip() if name is not None and str(name).strip() else f"Товар #{pid}",
+        "price": str(price).strip() if price is not None and str(price).strip() else "",
+        "unit": unit_s,
+        "is_weight": _unit_is_kg_value(unit_s),
+        "updated_at": row["updated_at"],
+    }
+
+
+def search_cached_products(
+    branch_id: str | None,
+    query: str,
+    *,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    q = str(query or "").strip().lower()
+    if not q:
+        return []
+    products = get_cached_products(branch_id, kg_only=False, limit=max(80, int(limit) * 6))
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for product in products:
+        name = str(product.get("name") or "").strip().lower()
+        barcode = str(product.get("barcode") or "").strip().lower()
+        if not name and not barcode:
+            continue
+        score = -1
+        if name.startswith(q):
+            score = 300
+        elif q in name:
+            score = 200
+        elif barcode and barcode.startswith(q):
+            score = 180
+        elif barcode and q in barcode:
+            score = 120
+        if score >= 0:
+            ranked.append((score, product))
+    ranked.sort(
+        key=lambda item: (
+            -item[0],
+            -float(item[1].get("updated_at") or 0),
+            str(item[1].get("name") or ""),
+        )
+    )
+    return [product for _, product in ranked[: max(1, int(limit))]]
 
 
 def ingest_product_dict(branch_id: str | None, p: dict[str, Any], barcode_hint: str | None = None) -> None:
@@ -298,7 +447,13 @@ def ingest_product_dict(branch_id: str | None, p: dict[str, Any], barcode_hint: 
     if not bc:
         return
     upsert_row(
-        branch_id, bc, pid, _product_name(p), _product_price(p), unit=_product_unit(p)
+        branch_id,
+        bc,
+        pid,
+        _product_name(p),
+        _product_price(p),
+        unit=_product_unit(p),
+        image_url=_image_url_for_row(p),
     )
 
 
@@ -307,7 +462,9 @@ def ingest_product_list(branch_id: str | None, products: list) -> None:
         return
     bk = _branch_key(branch_id)
     now = time.time()
-    rows: list[tuple[str, str, str, str | None, str | None, str | None, float]] = []
+    rows: list[
+        tuple[str, str, str, str | None, str | None, str | None, str | None, float]
+    ] = []
     for p in products:
         if not isinstance(p, dict):
             continue
@@ -318,7 +475,16 @@ def ingest_product_list(branch_id: str | None, products: list) -> None:
         if not bc:
             continue
         rows.append(
-            (bk, bc, pid, _product_name(p), _product_price(p), _product_unit(p), now)
+            (
+                bk,
+                bc,
+                pid,
+                _product_name(p),
+                _product_price(p),
+                _product_unit(p),
+                _image_url_for_row(p),
+                now,
+            )
         )
     if not rows:
         return
@@ -328,13 +494,14 @@ def ingest_product_list(branch_id: str | None, products: list) -> None:
             _ensure_schema(c)
             c.executemany(
                 """
-                INSERT INTO products (branch_id, barcode, product_id, name, price, unit, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO products (branch_id, barcode, product_id, name, price, unit, image_url, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(branch_id, barcode) DO UPDATE SET
                     product_id = excluded.product_id,
                     name = COALESCE(excluded.name, products.name),
                     price = COALESCE(excluded.price, products.price),
                     unit = COALESCE(excluded.unit, products.unit),
+                    image_url = COALESCE(NULLIF(TRIM(excluded.image_url), ''), products.image_url),
                     updated_at = excluded.updated_at
                 """,
                 rows,
@@ -351,7 +518,9 @@ def ingest_cart(branch_id: str | None, cart: dict[str, Any]) -> None:
         return
     bk = _branch_key(branch_id)
     now = time.time()
-    rows: list[tuple[str, str, str, str | None, str | None, str | None, float]] = []
+    rows: list[
+        tuple[str, str, str, str | None, str | None, str | None, str | None, float]
+    ] = []
     for it in items:
         if not isinstance(it, dict):
             continue
@@ -374,10 +543,12 @@ def ingest_cart(branch_id: str | None, cart: dict[str, Any]) -> None:
         name = None
         price = None
         unt: str | None = None
+        img_u: str | None = None
         if isinstance(prod, dict):
             name = _product_name(prod)
             price = _product_price(prod)
             unt = _product_unit(prod)
+            img_u = _image_url_for_row(prod)
         if name is None:
             name = _name_from_item(it)
         if price is None:
@@ -390,7 +561,7 @@ def ingest_cart(branch_id: str | None, cart: dict[str, Any]) -> None:
             u = it.get("unit")
             if u is not None and str(u).strip():
                 unt = str(u).strip()
-        rows.append((bk, bc, pid_s, name, price, unt, now))
+        rows.append((bk, bc, pid_s, name, price, unt, img_u, now))
     if not rows:
         return
     with _lock:
@@ -399,13 +570,14 @@ def ingest_cart(branch_id: str | None, cart: dict[str, Any]) -> None:
             _ensure_schema(c)
             c.executemany(
                 """
-                INSERT INTO products (branch_id, barcode, product_id, name, price, unit, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO products (branch_id, barcode, product_id, name, price, unit, image_url, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(branch_id, barcode) DO UPDATE SET
                     product_id = excluded.product_id,
                     name = COALESCE(excluded.name, products.name),
                     price = COALESCE(excluded.price, products.price),
                     unit = COALESCE(excluded.unit, products.unit),
+                    image_url = COALESCE(NULLIF(TRIM(excluded.image_url), ''), products.image_url),
                     updated_at = excluded.updated_at
                 """,
                 rows,
