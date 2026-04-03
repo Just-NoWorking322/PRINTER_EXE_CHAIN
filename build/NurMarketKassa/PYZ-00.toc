@@ -3462,6 +3462,10 @@
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\printer_config.py',
    'PYMODULE'),
+  ('product_media',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\product_media.py',
+   'PYMODULE'),
   ('pty',
    'C:\\Program '
    'Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\\Lib\\pty.py',

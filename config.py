@@ -58,3 +58,138 @@ def _env_truthy(key: str, default: str = "0") -> bool:
 POS_SYNC_FALLBACK_CUSTOM_ON_STOCK_ERROR = _env_truthy(
     "DESKTOP_MARKET_POS_SYNC_STOCK_FALLBACK", "1"
 )
+
+# --- Производительность / слабое железо ---
+# DESKTOP_MARKET_LOW_SPEC=1 — снижает лимиты каталога, параллельную подгрузку превью, частоту опроса офлайн-синка.
+# DESKTOP_MARKET_DISABLE_CATALOG_IMAGES=1 — не запрашивать картинки товаров в сетке (остаётся иконка-заглушка).
+# Точечная настройка (если LOW_SPEC=0): DESKTOP_MARKET_QUICK_CATALOG_LIMIT, _THUMB_CONCURRENCY,
+# _THUMB_URL_TRIES, _QUICK_CATALOG_PAGES, _QUICK_CATALOG_POOL_MULT, _QUICK_CATALOG_PAGE_ROWS,
+# _LIVE_SEARCH_DEBOUNCE, _OFFLINE_SYNC_POLL_SEC, _CATALOG_IMAGE_BOX_HEIGHT.
+
+LOW_SPEC_MODE = _env_truthy("DESKTOP_MARKET_LOW_SPEC", "0")
+DISABLE_CATALOG_IMAGES = _env_truthy("DESKTOP_MARKET_DISABLE_CATALOG_IMAGES", "0")
+
+
+def catalog_images_disabled() -> bool:
+    return DISABLE_CATALOG_IMAGES
+
+
+def _perf_int(key: str, default: int, *, low: int, clamp_min: int = 1, clamp_max: int | None = None) -> int:
+    if LOW_SPEC_MODE:
+        v = low
+    else:
+        raw = os.environ.get(key, "").strip()
+        if not raw:
+            v = default
+        else:
+            try:
+                v = int(raw, 0)
+            except ValueError:
+                v = default
+    v = max(clamp_min, v)
+    if clamp_max is not None:
+        v = min(v, clamp_max)
+    return v
+
+
+def _perf_float(key: str, default: float, *, low: float, clamp_min: float) -> float:
+    if LOW_SPEC_MODE:
+        v = low
+    else:
+        raw = os.environ.get(key, "").strip()
+        if not raw:
+            v = default
+        else:
+            try:
+                v = float(raw.replace(",", "."))
+            except ValueError:
+                v = default
+    return max(clamp_min, v)
+
+
+def pos_performance_quick_catalog_limit() -> int:
+    return _perf_int(
+        "DESKTOP_MARKET_QUICK_CATALOG_LIMIT",
+        60,
+        low=36,
+        clamp_min=12,
+        clamp_max=200,
+    )
+
+
+def pos_performance_catalog_pool_multiplier() -> int:
+    return _perf_int(
+        "DESKTOP_MARKET_QUICK_CATALOG_POOL_MULT",
+        8,
+        low=5,
+        clamp_min=2,
+        clamp_max=24,
+    )
+
+
+def pos_performance_catalog_pages() -> int:
+    return _perf_int(
+        "DESKTOP_MARKET_QUICK_CATALOG_PAGES",
+        10,
+        low=6,
+        clamp_min=1,
+        clamp_max=30,
+    )
+
+
+def pos_performance_thumb_concurrency() -> int:
+    return _perf_int(
+        "DESKTOP_MARKET_THUMB_CONCURRENCY",
+        6,
+        low=2,
+        clamp_min=1,
+        clamp_max=12,
+    )
+
+
+def pos_performance_thumb_url_tries() -> int:
+    return _perf_int(
+        "DESKTOP_MARKET_THUMB_URL_TRIES",
+        6,
+        low=3,
+        clamp_min=1,
+        clamp_max=12,
+    )
+
+
+def pos_performance_quick_catalog_page_rows() -> int:
+    return _perf_int(
+        "DESKTOP_MARKET_QUICK_CATALOG_PAGE_ROWS",
+        3,
+        low=2,
+        clamp_min=1,
+        clamp_max=8,
+    )
+
+
+def pos_performance_live_search_debounce() -> float:
+    return _perf_float(
+        "DESKTOP_MARKET_LIVE_SEARCH_DEBOUNCE",
+        0.22,
+        low=0.45,
+        clamp_min=0.05,
+    )
+
+
+def pos_performance_offline_sync_poll() -> float:
+    return _perf_float(
+        "DESKTOP_MARKET_OFFLINE_SYNC_POLL_SEC",
+        5.0,
+        low=12.0,
+        clamp_min=2.0,
+    )
+
+
+def pos_performance_catalog_image_box_height() -> int:
+    return _perf_int(
+        "DESKTOP_MARKET_CATALOG_IMAGE_BOX_HEIGHT",
+        148,
+        low=108,
+        clamp_min=72,
+        clamp_max=220,
+    )

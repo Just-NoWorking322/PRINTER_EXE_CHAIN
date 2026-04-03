@@ -5,7 +5,10 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('C:\\Users\\TechLine\\OneDrive\\Рабочий стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\bundle_escpos\\capabilities.json', 'escpos')],
+    datas=[
+        ('C:\\Users\\TechLine\\OneDrive\\Рабочий стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\bundle_escpos\\capabilities.json', 'escpos'),
+        ('C:\\Users\\TechLine\\OneDrive\\Рабочий стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\assets\\header_logo.png', 'assets'),
+    ],
     hiddenimports=['escpos.printer', 'escpos.capabilities', 'serial', 'serial.tools.list_ports', 'usb.core', 'usb.util'],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +38,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    version='C:\\Users\\TechLine\\AppData\\Local\\Temp\\f24a6310-a7f7-447c-9bae-971dfe316acc',
+    version='C:\\Users\\TechLine\\AppData\\Local\\Temp\\4e8bbddc-37f0-42b2-9c9f-b7b5a8ec847e',
+    icon='C:\\Users\\TechLine\\OneDrive\\Рабочий стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\assets\\nurmarket_logo.ico',
 )

@@ -468,6 +468,7 @@ def update_item(
     quantity: str | None = None,
     unit_price: str | None = None,
     discount_total: str | None = None,
+    sale_as_weight: bool | None = None,
 ) -> dict[str, Any] | None:
     cart_id_s = (cart_id or "").strip()
     item_id_s = (item_id or "").strip()
@@ -488,6 +489,18 @@ def update_item(
         qty = _parse_float(quantity if quantity is not None else row["quantity"])
         price = _parse_float(unit_price if unit_price is not None else row["unit_price"])
         disc = max(0.0, _parse_float(discount_total if discount_total is not None else row["discount_total"]))
+        iw = int(row["is_weight"] or 0)
+        unit_s = str(row["unit"] or "").strip()
+        payload = _json_loads(row["product_payload"], {})
+        if not isinstance(payload, dict):
+            payload = {}
+        if sale_as_weight is not None:
+            iw = 1 if sale_as_weight else 0
+            unit_s = "кг" if sale_as_weight else "шт"
+            payload = dict(payload)
+            payload["is_weight"] = bool(sale_as_weight)
+            payload["is_wait"] = bool(sale_as_weight)
+            payload["unit"] = unit_s
         if qty <= 0:
             conn.execute(
                 "DELETE FROM offline_cart_items WHERE item_id = ?",
@@ -498,10 +511,21 @@ def update_item(
             conn.execute(
                 """
                 UPDATE offline_cart_items
-                SET quantity = ?, unit_price = ?, discount_total = ?, line_total = ?, updated_at = ?
+                SET quantity = ?, unit_price = ?, discount_total = ?, line_total = ?,
+                    is_weight = ?, unit = ?, product_payload = ?, updated_at = ?
                 WHERE item_id = ?
                 """,
-                (_quantity(qty), _money(price), _money(disc), _money(line_total), _now(), item_id_s),
+                (
+                    _quantity(qty),
+                    _money(price),
+                    _money(disc),
+                    _money(line_total),
+                    iw,
+                    unit_s,
+                    _json_dumps(payload),
+                    _now(),
+                    item_id_s,
+                ),
             )
         return _recalc_cart(conn, cart_id_s)
     finally:

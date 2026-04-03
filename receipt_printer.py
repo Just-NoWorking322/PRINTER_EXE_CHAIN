@@ -192,8 +192,39 @@ def _product_must_weigh_for_receipt(p: dict[str, Any]) -> bool:
     return False
 
 
+_WEIGHT_NAME_HINTS: tuple[str, ...] = (
+    "карто",
+    "картоф",
+    "помид",
+    "томат",
+    "огур",
+    "лук",
+    "морков",
+    "капуст",
+    "яблок",
+    "банан",
+    "апельсин",
+    "груш",
+    "перец",
+    "свекл",
+    "свёкл",
+)
+
+
+def _name_looks_weighed(name: Any) -> bool:
+    raw = str(name or "").strip().lower()
+    if not raw:
+        return False
+    return any(h in raw for h in _WEIGHT_NAME_HINTS)
+
+
 def _item_unit_label(it: dict[str, Any]) -> str:
     if not isinstance(it, dict):
+        return "шт"
+    mode = it.get("_pos_unit_mode")
+    if mode == "kg":
+        return "кг"
+    if mode == "piece":
         return "шт"
     if _truthy_api_bool(it.get("is_wait")) or _truthy_api_bool(it.get("is_weight")):
         return "кг"
@@ -202,6 +233,8 @@ def _item_unit_label(it: dict[str, Any]) -> str:
     for src in (it.get("product"), it.get("product_snapshot")):
         if isinstance(src, dict) and _product_must_weigh_for_receipt(src):
             return "кг"
+    if _name_looks_weighed(_item_title(it)):
+        return "кг"
     return "шт"
 
 
@@ -437,7 +470,7 @@ def _compose_sale_receipt_rows(
         qty = _qty_display(it.get("quantity", "1")).replace(".", ",")
         lam = _money_display(_line_amount(it))
         unit_label = _item_unit_label(it)
-        unit_suffix = "сом/кг" if unit_label == "кг" else "сом/шт"
+        unit_suffix = "сом/кг" if unit_label == "кг" else "сом"
         rows.append(("left", f"{qty} {unit_label} x {up} {unit_suffix}"))
         rows.append(("right", lam))
 

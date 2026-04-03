@@ -231,6 +231,7 @@ def update_item(
     quantity: str | None = None,
     unit_price: str | None = None,
     discount_total: str | None = None,
+    sale_as_weight: bool | None = None,
 ) -> dict[str, Any]:
     cart = offline_store.update_item(
         cart_id=cart_id,
@@ -238,6 +239,7 @@ def update_item(
         quantity=quantity,
         unit_price=unit_price,
         discount_total=discount_total,
+        sale_as_weight=sale_as_weight,
     )
     if not cart:
         raise OfflinePosError("Не удалось обновить позицию локально.")

@@ -5,6 +5,8 @@ DESKTOP_MARKET_FULLSCREEN — 1 (по умолчанию) полноэкранн
 DESKTOP_MARKET_SCALE_ENABLED — 0 отключает блок весов.
 DESKTOP_MARKET_RECEIPT_USE_API_TEXT — 1: печатать сырой текст чека с API; иначе — оформленный локальный макет.
 DESKTOP_MARKET_RECEIPT_COERCE_CP866_TABLE — 1: при CP866 принудительно ESC t 17 вместо 46 (по умолчанию выкл.).
+DESKTOP_MARKET_LOW_SPEC — 1: режим слабого ПК (меньше товаров в быстром каталоге, меньше параллельных превью, реже опрос синка).
+DESKTOP_MARKET_DISABLE_CATALOG_IMAGES — 1: не подгружать фото в сетке товаров.
 """
 
 from __future__ import annotations
@@ -33,6 +35,12 @@ def _patch_escpos_for_pyinstaller() -> None:
 
 
 _patch_escpos_for_pyinstaller()
+
+
+def _runtime_asset_path(*parts: str) -> str:
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
 
 import flet as ft
 import requests
@@ -294,6 +302,32 @@ def _product_must_weigh(p: Any) -> bool:
     return False
 
 
+_WEIGHT_NAME_HINTS: tuple[str, ...] = (
+    "карто",
+    "картоф",
+    "помид",
+    "томат",
+    "огур",
+    "лук",
+    "морков",
+    "капуст",
+    "яблок",
+    "банан",
+    "апельсин",
+    "груш",
+    "перец",
+    "свекл",
+    "свёкл",
+)
+
+
+def _name_looks_weighed(name: Any) -> bool:
+    raw = str(name or "").strip().lower()
+    if not raw:
+        return False
+    return any(h in raw for h in _WEIGHT_NAME_HINTS)
+
+
 def _product_image_url(p: Any) -> str | None:
     """URL картинки товара из типичных полей API (абсолютный для Image)."""
     return _product_image_url_resolve(p, API_BASE_URL)
@@ -310,7 +344,16 @@ def _thumb_url_is_public_cdn(url: str) -> bool:
     return False
 
 
+# Ручной выбор кассира: «кг» или «шт» для строки (ошибка ввода / смена типа продажи).
+_POS_UNIT_MODE_KEY = "_pos_unit_mode"
+
+
 def _cart_line_must_weigh(it: dict[str, Any]) -> bool:
+    mode = it.get(_POS_UNIT_MODE_KEY)
+    if mode == "kg":
+        return True
+    if mode == "piece":
+        return False
     if _truthy_api_bool(it.get("is_wait")) or _truthy_api_bool(it.get("is_weight")):
         return True
     if _dict_has_kg_unit(it):
@@ -320,6 +363,8 @@ def _cart_line_must_weigh(it: dict[str, Any]) -> bool:
         return True
     snap = it.get("product_snapshot")
     if isinstance(snap, dict) and _product_must_weigh(snap):
+        return True
+    if _name_looks_weighed(_item_name(it)):
         return True
     return False
 
@@ -519,8 +564,8 @@ BARCODE_BUFFER_MAX_LEN = 64
 MIN_BARCODE_LEN = 4
 # Поле поиска: не дергать живой поиск по длинной строке «только цифры» (сканер в фокусе поля).
 BARCODE_LIKE_MIN_DIGITS = 8
-LIVE_SEARCH_DEBOUNCE_SEC = 0.22
-OFFLINE_SYNC_POLL_SEC = 5.0
+LIVE_SEARCH_DEBOUNCE_SEC = config.pos_performance_live_search_debounce()
+OFFLINE_SYNC_POLL_SEC = config.pos_performance_offline_sync_poll()
 
 # NUR CRM: три колонки, тёмный бренд-бар сверху, акцент #f7d617
 UI_BRAND = "#f7d617"
@@ -570,14 +615,22 @@ VK_LAYOUT_NUM = (
     ("7", "8", "9"),
     (",", "0", "."),
 )
-QUICK_CATALOG_LIMIT = 60
+QUICK_CATALOG_LIMIT = config.pos_performance_quick_catalog_limit()
 # Один запрос каталога вместо двух подборок под лимит карточек.
-QUICK_CATALOG_CATALOG_ITEMS_CAP = QUICK_CATALOG_LIMIT * 8
-QUICK_CATALOG_CATALOG_MAX_PAGES = 10
+QUICK_CATALOG_CATALOG_ITEMS_CAP = (
+    QUICK_CATALOG_LIMIT * config.pos_performance_catalog_pool_multiplier()
+)
+QUICK_CATALOG_CATALOG_MAX_PAGES = config.pos_performance_catalog_pages()
 # Параллельная подгрузка превью (деталь + картинка по JWT).
-PRODUCT_THUMB_HYDRATE_CONCURRENCY = 6
-PRODUCT_THUMB_MAX_URL_CANDIDATES = 6
+PRODUCT_THUMB_HYDRATE_CONCURRENCY = config.pos_performance_thumb_concurrency()
+PRODUCT_THUMB_MAX_URL_CANDIDATES = config.pos_performance_thumb_url_tries()
 PRODUCT_GRID_COLUMNS = 3
+# Быстрый каталог: сначала показываем «страницу», остальное — по кнопке (воспринимается быстрее).
+QUICK_CATALOG_PAGE_SIZE = (
+    PRODUCT_GRID_COLUMNS * config.pos_performance_quick_catalog_page_rows()
+)
+# Высота блока картинки на карточке в сетке (меньше — меньше декодирования/отрисовки).
+CATALOG_PRODUCT_IMAGE_BOX_HEIGHT = config.pos_performance_catalog_image_box_height()
 QUICK_CATALOG_PRESETS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
     "kg": (
         ("Картошка", ("картошка", "картофель")),
@@ -818,6 +871,7 @@ def main(page: ft.Page):
     local_products_cache.init_db()
     session: dict[str, Any] = {
         "cart_id": None,
+        "cart_line_unit_overrides": {},
         "cart": {},
         "needs_shift": False,
         "pos_cashbox_id": None,
@@ -835,6 +889,10 @@ def main(page: ft.Page):
         "quick_catalog_products": {"kg": [], "common": []},
         "quick_catalog_loading": {"kg": False, "common": False},
         "quick_catalog_loaded": {"kg": False, "common": False},
+        "quick_catalog_visible_count": {
+            "kg": QUICK_CATALOG_PAGE_SIZE,
+            "common": QUICK_CATALOG_PAGE_SIZE,
+        },
         # vk: left/bottom в Stack overlay (не offset в Row — иначе local_delta и clamp расходятся с экраном).
         "ui_pos": {
             "vk": {"left": None, "bottom": None},
@@ -974,16 +1032,78 @@ def main(page: ft.Page):
         session["pos_mode_reason"] = str(reason or "").strip()
         refresh_pos_mode_ui(flush=flush)
 
+    def _enrich_cart_line_items_from_local_cache() -> None:
+        """API часто не кладёт в строку чека is_weight/product — тогда подставляем снимок из локального каталога."""
+        cart = session.get("cart")
+        if not isinstance(cart, dict):
+            return
+        branch = client.active_branch_id
+        items = cart.get("items") or cart.get("cart_items") or []
+        if not isinstance(items, list):
+            return
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            pid = str(it.get("product_id") or "").strip()
+            if not pid:
+                continue
+            if _truthy_api_bool(it.get("is_wait")) or _truthy_api_bool(it.get("is_weight")):
+                continue
+            if _dict_has_kg_unit(it):
+                continue
+            prod = it.get("product")
+            if isinstance(prod, dict) and _product_must_weigh(prod):
+                continue
+            snap = it.get("product_snapshot")
+            if isinstance(snap, dict) and _product_must_weigh(snap):
+                continue
+            cached = local_products_cache.get_cached_product_by_id(branch, pid)
+            if not isinstance(cached, dict) or not _product_must_weigh(cached):
+                continue
+            it["product_snapshot"] = dict(cached)
+
+    def _merge_cart_line_unit_modes_into_session_cart() -> None:
+        _enrich_cart_line_items_from_local_cache()
+        cart = session.get("cart")
+        if not isinstance(cart, dict):
+            return
+        ovm = session.setdefault("cart_line_unit_overrides", {})
+        items = cart.get("items") or cart.get("cart_items") or []
+        if not isinstance(items, list):
+            return
+        alive: set[str] = set()
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            iid = _item_id(it)
+            if not iid:
+                continue
+            alive.add(iid)
+            mode = ovm.get(iid)
+            if mode in ("kg", "piece"):
+                it[_POS_UNIT_MODE_KEY] = mode
+            else:
+                it.pop(_POS_UNIT_MODE_KEY, None)
+        for k in list(ovm.keys()):
+            if k not in alive:
+                del ovm[k]
+
     def _apply_session_cart(cart: dict[str, Any] | None, *, flush: bool = True) -> None:
+        old_id = session.get("cart_id")
         if cart:
+            new_id = str(cart.get("id") or "").strip() or None
+            if new_id and new_id != old_id:
+                session["cart_line_unit_overrides"] = {}
             session["cart"] = cart
-            session["cart_id"] = str(cart.get("id") or "").strip() or None
+            session["cart_id"] = new_id
             sid = _shift_id_from_cart(cart)
             if sid:
                 session["active_shift_id"] = sid
+            _merge_cart_line_unit_modes_into_session_cart()
         else:
             session["cart"] = {}
             session["cart_id"] = None
+            session["cart_line_unit_overrides"] = {}
         set_shift_banner(False, flush=False)
         render_cart_items(flush=False)
         refresh_pos_mode_ui(flush=False)
@@ -1474,6 +1594,7 @@ def main(page: ft.Page):
         sid = _shift_id_from_cart(cart)
         if sid:
             session["active_shift_id"] = sid
+        _merge_cart_line_unit_modes_into_session_cart()
         render_cart_items(flush=flush)
         return True
 
@@ -1494,6 +1615,7 @@ def main(page: ft.Page):
             local_products_cache.ingest_cart(client.active_branch_id, cart)
         except Exception:
             pass
+        _merge_cart_line_unit_modes_into_session_cart()
         render_cart_items(flush=flush)
 
     def on_print_weight_click(_):
@@ -1717,15 +1839,134 @@ def main(page: ft.Page):
                 page.update()
             except RuntimeError:
                 break
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
 
     def open_line_item_edit(item: dict[str, Any], item_id: str):
         cid = session.get("cart_id")
         if not cid:
             return
 
-        weigh_line = _cart_line_must_weigh(item)
+        sale_as_weigh = [_cart_line_must_weigh(item)]
         stop_mirror: list[bool] = [False]
+        live_scale_ref = ft.Ref[ft.Text]()
+
+        dval = item.get("discount_total")
+        if dval is None:
+            dval = item.get("line_discount")
+
+        def _qty_label() -> str:
+            return "Вес, кг" if sale_as_weigh[0] else "Количество, шт"
+
+        tf_qty = bind_virtual_keyboard(
+            ft.TextField(
+                label=_qty_label(),
+                value=str(item.get("quantity", "1")),
+                hint_text="Вручную или «С весов»" if sale_as_weigh[0] else None,
+                dense=True,
+                width=280,
+                on_submit=lambda e: _save(),
+            ),
+            mode="numeric",
+            title=_qty_label(),
+            submit=lambda e: _save(),
+            submit_text="Сохранить",
+        )
+        tf_price = bind_virtual_keyboard(
+            ft.TextField(
+                label="Цена за ед. (базовая)",
+                value=_money(item.get("unit_price")),
+                dense=True,
+                width=280,
+                on_submit=lambda e: _save(),
+            ),
+            mode="numeric",
+            title="Цена",
+            submit=lambda e: _save(),
+            submit_text="Сохранить",
+        )
+        tf_disc = bind_virtual_keyboard(
+            ft.TextField(
+                label="Скидка на строку (сом, всего на позицию)",
+                value=_money(dval) if dval not in (None, "") else "0.00",
+                dense=True,
+                width=280,
+                on_submit=lambda e: _save(),
+            ),
+            mode="numeric",
+            title="Скидка по строке",
+            submit=lambda e: _save(),
+            submit_text="Сохранить",
+        )
+
+        def _apply_scale_to_qty_line(_e):
+            m = scale_state.get("mgr")
+            if not m:
+                snack("Весы не подключены — настройте COM в «Весы»", ft.Colors.AMBER_700)
+                return
+            w = m.get_last_weight()
+            if w is None or w <= 0:
+                snack("Нет веса с весов (поставьте товар и подождите)", ft.Colors.AMBER_700)
+                return
+            s = f"{w:.3f}".rstrip("0").rstrip(".")
+            tf_qty.value = s if s else str(w)
+            page.update()
+
+        scale_column = ft.Column(
+            [
+                ft.Text(
+                    "С весов сейчас (обновляется, как слева)",
+                    size=11,
+                    color=UI_MUTED,
+                ),
+                ft.Text(
+                    ref=live_scale_ref,
+                    value="—",
+                    size=22,
+                    weight=ft.FontWeight.W_600,
+                    color=UI_TEXT,
+                ),
+                ft.Row(
+                    [
+                        ft.OutlinedButton(
+                            "С весов",
+                            icon=ft.Icons.SCALE_OUTLINED,
+                            on_click=_apply_scale_to_qty_line,
+                        ),
+                    ],
+                    tight=True,
+                ),
+            ],
+            visible=sale_as_weigh[0],
+            tight=True,
+            spacing=6,
+        )
+
+        def _sync_qty_vk_title():
+            b = virtual_keyboard_bindings.get(id(tf_qty))
+            if b:
+                b["title"] = _qty_label()
+
+        def _set_unit_weigh(is_kg: bool):
+            sale_as_weigh[0] = is_kg
+            tf_qty.label = _qty_label()
+            tf_qty.hint_text = "Вручную или «С весов»" if is_kg else None
+            scale_column.visible = is_kg
+            unit_seg_bt.selected = ["kg" if is_kg else "piece"]
+            _sync_qty_vk_title()
+            page.update()
+
+        def _on_unit_seg(e):
+            sel = e.control.selected[0] if getattr(e.control, "selected", None) else "kg"
+            _set_unit_weigh(sel == "kg")
+
+        unit_seg_bt = ft.SegmentedButton(
+            segments=[
+                ft.Segment(value="kg", label=ft.Text("Кг")),
+                ft.Segment(value="piece", label=ft.Text("Шт")),
+            ],
+            selected=["kg" if sale_as_weigh[0] else "piece"],
+            on_change=_on_unit_seg,
+        )
 
         def _save(_e=None):
             stop_mirror[0] = True
@@ -1742,22 +1983,32 @@ def main(page: ft.Page):
                 snack(err, ft.Colors.AMBER_700)
                 return
 
-            body: dict[str, str] = {
+            body: dict[str, Any] = {
                 "quantity": normalize_decimal_string(tf_qty.value),
                 "unit_price": normalize_decimal_string(tf_price.value),
                 "discount_total": normalize_decimal_string(tf_disc.value)
                 if str(tf_disc.value or "").strip()
                 else "0.00",
             }
+            if sale_as_weigh[0]:
+                body["is_weight"] = True
+                body["unit"] = "кг"
+            else:
+                body["is_weight"] = False
+                body["unit"] = "шт"
+
+            ovm = session.setdefault("cart_line_unit_overrides", {})
+            ovm[item_id] = "kg" if sale_as_weigh[0] else "piece"
 
             if is_offline_mode():
                 try:
                     cart = offline_pos.update_item(
                         cart_id=str(cid),
                         item_id=item_id,
-                        quantity=body["quantity"],
-                        unit_price=body["unit_price"],
-                        discount_total=body["discount_total"],
+                        quantity=str(body["quantity"]),
+                        unit_price=str(body["unit_price"]),
+                        discount_total=str(body["discount_total"]),
+                        sale_as_weight=sale_as_weigh[0],
                     )
                     hide_virtual_keyboard()
                     page.dialog.open = False
@@ -1782,9 +2033,10 @@ def main(page: ft.Page):
                             cart = offline_pos.update_item(
                                 cart_id=str(session.get("cart_id") or ""),
                                 item_id=item_id,
-                                quantity=body["quantity"],
-                                unit_price=body["unit_price"],
-                                discount_total=body["discount_total"],
+                                quantity=str(body["quantity"]),
+                                unit_price=str(body["unit_price"]),
+                                discount_total=str(body["discount_total"]),
+                                sale_as_weight=sale_as_weigh[0],
                             )
                             hide_virtual_keyboard()
                             page.dialog.open = False
@@ -1812,109 +2064,34 @@ def main(page: ft.Page):
             page.dialog.open = False
             page.update()
 
-        dval = item.get("discount_total")
-        if dval is None:
-            dval = item.get("line_discount")
-        tf_qty = bind_virtual_keyboard(
-            ft.TextField(
-                label="Вес, кг" if weigh_line else "Количество",
-                value=str(item.get("quantity", "1")),
-                hint_text="Вручную или «Подставить вес»" if weigh_line else None,
-                dense=True,
-                width=280,
-                on_submit=_save,
+        content_controls: list[ft.Control] = [
+            ft.Container(
+                padding=ft.Padding.only(bottom=6),
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            "Учёт на чеке (кг или шт)",
+                            size=12,
+                            color=UI_MUTED,
+                        ),
+                        unit_seg_bt,
+                    ],
+                    tight=True,
+                    spacing=6,
+                ),
             ),
-            mode="numeric",
-            title="Вес, кг" if weigh_line else "Количество",
-            submit=_save,
-            submit_text="Сохранить",
-        )
-        tf_price = bind_virtual_keyboard(
-            ft.TextField(
-                label="Цена за ед. (базовая)",
-                value=_money(item.get("unit_price")),
-                dense=True,
-                width=280,
-                on_submit=_save,
-            ),
-            mode="numeric",
-            title="Цена",
-            submit=_save,
-            submit_text="Сохранить",
-        )
-        tf_disc = bind_virtual_keyboard(
-            ft.TextField(
-                label="Скидка на строку (сом, всего на позицию)",
-                value=_money(dval) if dval not in (None, "") else "0.00",
-                dense=True,
-                width=280,
-                on_submit=_save,
-            ),
-            mode="numeric",
-            title="Скидка по строке",
-            submit=_save,
-            submit_text="Сохранить",
-        )
-
-        content_controls: list[ft.Control] = []
-        dlg: ft.AlertDialog
-        if weigh_line:
-            live_scale_ref = ft.Ref[ft.Text]()
-
-            def _apply_scale_to_qty_line(_e):
-                m = scale_state.get("mgr")
-                if not m:
-                    snack("Весы не подключены — настройте COM в «Весы»", ft.Colors.AMBER_700)
-                    return
-                w = m.get_last_weight()
-                if w is None or w <= 0:
-                    snack("Нет веса с весов (поставьте товар и подождите)", ft.Colors.AMBER_700)
-                    return
-                s = f"{w:.3f}".rstrip("0").rstrip(".")
-                tf_qty.value = s if s else str(w)
-                page.update()
-
-            content_controls.append(
-                ft.Container(
-                    padding=ft.Padding.only(bottom=6),
-                    content=ft.Column(
-                        [
-                            ft.Text(
-                                "С весов сейчас (обновляется, как слева)",
-                                size=11,
-                                color=UI_MUTED,
-                            ),
-                            ft.Text(
-                                ref=live_scale_ref,
-                                value="—",
-                                size=22,
-                                weight=ft.FontWeight.W_600,
-                                color=UI_TEXT,
-                            ),
-                            ft.Row(
-                                [
-                                    ft.OutlinedButton(
-                                        "С весов",
-                                        icon=ft.Icons.SCALE_OUTLINED,
-                                        on_click=_apply_scale_to_qty_line,
-                                    ),
-                                ],
-                                tight=True,
-                            ),
-                        ],
-                        tight=True,
-                        spacing=6,
-                    ),
-                )
-            )
-        content_controls.extend([tf_qty, tf_price, tf_disc])
+            ft.Container(padding=ft.Padding.only(bottom=6), content=scale_column),
+            tf_qty,
+            tf_price,
+            tf_disc,
+        ]
 
         dlg = ft.AlertDialog(
             modal=True,
             bgcolor=UI_SURFACE,
             shape=ft.RoundedRectangleBorder(radius=16),
             title=ft.Text(
-                "Вес, цена и скидка по строке" if weigh_line else "Цена и скидка по строке",
+                "Количество, цена и скидка",
                 color=UI_TEXT,
                 weight=ft.FontWeight.W_600,
             ),
@@ -1933,8 +2110,177 @@ def main(page: ft.Page):
         page.dialog = dlg
         dlg.open = True
         page.update()
-        if weigh_line:
-            page.run_task(_dialog_scale_live_loop, live_scale_ref, stop_mirror, dlg)
+        page.run_task(_dialog_scale_live_loop, live_scale_ref, stop_mirror, dlg)
+
+    def open_line_item_weight_dialog(item: dict[str, Any], item_id: str):
+        """Короткий диалог взвешивания позиции из текущего чека."""
+        cid = session.get("cart_id")
+        if not cid or not item_id:
+            return
+
+        stop_scale_mirror = [False]
+        live_scale_ref = ft.Ref[ft.Text]()
+        name = _item_name(item)
+        initial = normalize_decimal_string(str(item.get("quantity") or ""))
+        if not initial:
+            initial = "0.1"
+
+        def close_dlg():
+            stop_scale_mirror[0] = True
+            dismiss_dialog()
+
+        def apply_from_scale(_e):
+            m = scale_state.get("mgr")
+            if not m:
+                snack("Весы не подключены — настройте COM в «Весы»", ft.Colors.AMBER_700)
+                return
+            w = m.get_last_weight()
+            if w is None or w <= 0:
+                snack("Нет веса с весов (поставьте товар и подождите)", ft.Colors.AMBER_700)
+                return
+            s = f"{w:.3f}".rstrip("0").rstrip(".")
+            tf_qty.value = s if s else str(w)
+            page.update()
+
+        def save_weight(_e=None):
+            err = validate_quantity(tf_qty.value)
+            if err:
+                snack(err, ft.Colors.AMBER_700)
+                return
+            qty_val = normalize_decimal_string(tf_qty.value)
+            body = {"quantity": qty_val, "is_weight": True, "unit": "кг"}
+            ovm = session.setdefault("cart_line_unit_overrides", {})
+            ovm[item_id] = "kg"
+
+            if is_offline_mode():
+                try:
+                    cart = offline_pos.update_item(
+                        cart_id=str(cid),
+                        item_id=item_id,
+                        quantity=qty_val,
+                        sale_as_weight=True,
+                    )
+                    close_dlg()
+                    _apply_session_cart(cart, flush=True)
+                    snack("Вес обновлён", ft.Colors.GREEN_700)
+                except OfflinePosError as ex:
+                    snack(str(ex), ft.Colors.RED_700)
+                return
+
+            async def _save_async():
+                set_loading(True, flush=False)
+                try:
+                    resp = await asyncio.to_thread(client.pos_cart_item_patch, cid, item_id, body)
+                    close_dlg()
+                    if not _apply_cart_from_response(resp, flush=False):
+                        await _reload_cart_async(flush=False)
+                    _persist_offline_session()
+                    snack("Вес обновлён", ft.Colors.GREEN_700)
+                except requests.exceptions.RequestException:
+                    if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
+                        try:
+                            cart = offline_pos.update_item(
+                                cart_id=str(session.get("cart_id") or ""),
+                                item_id=item_id,
+                                quantity=qty_val,
+                                sale_as_weight=True,
+                            )
+                            close_dlg()
+                            _apply_session_cart(cart, flush=False)
+                            snack("Вес обновлён", ft.Colors.GREEN_700)
+                        except OfflinePosError as off_ex:
+                            set_loading(False, flush=False)
+                            snack(str(off_ex), ft.Colors.RED_700)
+                            return
+                    else:
+                        set_loading(False, flush=False)
+                        snack("Нет сети. Офлайн-сессия недоступна.", ft.Colors.RED_700)
+                        return
+                except ApiError as ex:
+                    set_loading(False, flush=False)
+                    snack(str(ex), ft.Colors.RED_700)
+                    return
+                finally:
+                    set_loading(False)
+
+            page.run_task(_save_async)
+
+        tf_qty = ft.TextField(
+            label="Вес, кг",
+            value=initial,
+            hint_text="Введите вручную или «С весов»",
+            dense=True,
+            autofocus=True,
+            on_submit=save_weight,
+            keyboard_type=ft.KeyboardType.NUMBER,
+        )
+
+        mgr = scale_state.get("mgr")
+        live_initial = "—"
+        if mgr:
+            w0 = mgr.get_last_weight()
+            if w0 is not None and w0 > 0:
+                live_initial = f"{w0:.3f} кг"
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            bgcolor=UI_SURFACE,
+            shape=ft.RoundedRectangleBorder(radius=16),
+            title=ft.Text(
+                f"Взвесить: {name}",
+                color=UI_TEXT,
+                weight=ft.FontWeight.W_600,
+            ),
+            content=ft.Column(
+                [
+                    ft.Text(
+                        f"Цена за кг: {_money(item.get('unit_price'))} сом",
+                        size=12,
+                        color=UI_MUTED,
+                    ),
+                    ft.Container(
+                        padding=ft.Padding.only(top=4, bottom=4),
+                        content=ft.Column(
+                            [
+                                ft.Text(
+                                    "На весах сейчас (как слева на кассе)",
+                                    size=11,
+                                    color=UI_MUTED,
+                                ),
+                                ft.Text(
+                                    ref=live_scale_ref,
+                                    value=live_initial,
+                                    size=22,
+                                    weight=ft.FontWeight.W_600,
+                                    color=UI_TEXT,
+                                ),
+                            ],
+                            tight=True,
+                            spacing=4,
+                        ),
+                    ),
+                    tf_qty,
+                    ft.OutlinedButton(
+                        "С весов",
+                        icon=ft.Icons.SCALE_OUTLINED,
+                        on_click=apply_from_scale,
+                    ),
+                ],
+                tight=True,
+                width=320,
+                spacing=10,
+            ),
+            actions=[
+                ft.TextButton("Отмена", on_click=lambda e: close_dlg()),
+                ft.FilledButton(
+                    "В чек",
+                    style=ft.ButtonStyle(bgcolor=UI_ACCENT, color=UI_TEXT_ON_YELLOW),
+                    on_click=save_weight,
+                ),
+            ],
+        )
+        _show_modal_dialog(dlg)
+        page.run_task(_dialog_scale_live_loop, live_scale_ref, stop_scale_mirror, dlg)
 
     def set_shift_banner(needs: bool, detail: str = "", *, flush: bool = True):
         session["needs_shift"] = needs
@@ -1965,7 +2311,8 @@ def main(page: ft.Page):
                 ft.Container(
                     width=float("inf"),
                     content=ft.Text(
-                        "Нет позиций — отсканируйте штрихкод или добавьте товар из поиска",
+                        "Нет позиций — отсканируйте штрихкод или добавьте товар из поиска. "
+                        "По строке в чеке можно нажать, чтобы изменить вес, цену и кг/шт.",
                         color=UI_MUTED,
                         size=14,
                         text_align=ft.TextAlign.CENTER,
@@ -2123,13 +2470,18 @@ def main(page: ft.Page):
                         width=float("inf"),
                         content=ft.Row(
                             [
-                                ft.Container(
-                                    content=ft.Column(
-                                        sub_lines,
-                                        spacing=2,
-                                        horizontal_alignment=ft.CrossAxisAlignment.START,
+                                ft.GestureDetector(
+                                    mouse_cursor=ft.MouseCursor.CLICK,
+                                    on_tap=lambda e, row=it, rid=iid: open_line_item_edit(row, rid),
+                                    content=ft.Container(
+                                        content=ft.Column(
+                                            sub_lines,
+                                            spacing=2,
+                                            horizontal_alignment=ft.CrossAxisAlignment.START,
+                                        ),
+                                        expand=True,
+                                        tooltip="Вес/кол-во, цена, кг или шт",
                                     ),
-                                    expand=True,
                                 ),
                                 ft.Row(
                                     [
@@ -2142,13 +2494,25 @@ def main(page: ft.Page):
                                             text_align=ft.TextAlign.RIGHT,
                                             no_wrap=True,
                                         ),
+                                        *(
+                                            [
+                                                ft.IconButton(
+                                                    ft.Icons.SCALE_OUTLINED,
+                                                    tooltip="Изменить вес",
+                                                    icon_color=UI_ACCENT,
+                                                    icon_size=20,
+                                                    style=_icon_btn_style,
+                                                    on_click=lambda e, row=it, rid=iid: open_line_item_weight_dialog(
+                                                        row, rid
+                                                    ),
+                                                ),
+                                            ]
+                                            if line_is_weighed
+                                            else []
+                                        ),
                                         ft.IconButton(
                                             ft.Icons.EDIT_NOTE,
-                                            tooltip=(
-                                                "Вес, цена и скидка"
-                                                if line_is_weighed
-                                                else "Цена и скидка строки"
-                                            ),
+                                            tooltip="Вес, цена, кг/шт",
                                             icon_color=UI_MUTED,
                                             icon_size=20,
                                             style=_icon_btn_style,
@@ -2184,7 +2548,7 @@ def main(page: ft.Page):
                                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                 ),
                             ],
-                            alignment=ft.MainAxisAlignment.START,
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                         padding=ft.Padding.symmetric(vertical=8, horizontal=10),
@@ -2295,6 +2659,7 @@ def main(page: ft.Page):
                     set_shift_banner(True, detail, flush=False)
                     session["cart_id"] = None
                     session["cart"] = {}
+                    session["cart_line_unit_overrides"] = {}
                     session["active_shift_id"] = None
                     render_cart_items(flush=False)
                     set_loading(False, flush=False)
@@ -2822,6 +3187,8 @@ def main(page: ft.Page):
         return None
 
     async def _hydrate_product_thumbs(items: list[Any], context: str) -> None:
+        if config.catalog_images_disabled():
+            return
         if not items or not getattr(client, "access", None):
             return
         cache: dict[str, str] = session.setdefault("product_thumb_cache", {})
@@ -2992,11 +3359,11 @@ def main(page: ft.Page):
                 continue
             break
 
-        img_h = 148
+        img_h = CATALOG_PRODUCT_IMAGE_BOX_HEIGHT
         if img_src:
             img_ctrl: ft.Control = ft.Image(
                 src=img_src,
-                height=img_h - 16,
+                height=max(40, img_h - 16),
                 fit=ft.BoxFit.CONTAIN,
                 gapless_playback=True,
             )
@@ -3157,6 +3524,31 @@ def main(page: ft.Page):
                 row_controls.append(ft.Container(expand=1))
             col.controls.append(ft.Row(row_controls, spacing=8))
 
+    def _schedule_hydrate_quick_catalog_thumbs(tab: str) -> None:
+        if not getattr(client, "access", None):
+            return
+        prods = (session.get("quick_catalog_products") or {}).get(tab) or []
+        if not prods:
+            return
+        vc_map = session.setdefault("quick_catalog_visible_count", {})
+        n = int(vc_map.get(tab) or QUICK_CATALOG_PAGE_SIZE)
+        n = min(max(1, n), len(prods))
+        page.run_task(_hydrate_product_thumbs, prods[:n], f"c:{tab}")
+
+    def _on_quick_catalog_show_more(_):
+        t = str(session.get("quick_catalog_tab") or "kg")
+        all_p = (session.get("quick_catalog_products") or {}).get(t) or []
+        if not all_p:
+            return
+        vc_map = session.setdefault("quick_catalog_visible_count", {})
+        cur = int(vc_map.get(t) or QUICK_CATALOG_PAGE_SIZE)
+        n_new = min(cur + QUICK_CATALOG_PAGE_SIZE, len(all_p))
+        chunk = all_p[cur:n_new]
+        vc_map[t] = n_new
+        _render_quick_catalog(tab=t)
+        if getattr(client, "access", None) and chunk:
+            page.run_task(_hydrate_product_thumbs, chunk, f"c:{t}")
+
     def _render_quick_catalog(
         products: list | None = None,
         tab: str | None = None,
@@ -3168,7 +3560,16 @@ def main(page: ft.Page):
             return
         active_tab = str(tab or session.get("quick_catalog_tab") or "kg")
         all_products = session.get("quick_catalog_products") or {}
-        items = products if products is not None else (all_products.get(active_tab) or [])
+        items_full = products if products is not None else (all_products.get(active_tab) or [])
+        vc_map = session.setdefault("quick_catalog_visible_count", {})
+        raw_vis = int(vc_map.get(active_tab) or QUICK_CATALOG_PAGE_SIZE)
+        if items_full:
+            vis_cap = min(max(QUICK_CATALOG_PAGE_SIZE, raw_vis), len(items_full))
+            if vis_cap != raw_vis:
+                vc_map[active_tab] = vis_cap
+        else:
+            vis_cap = raw_vis
+        items = items_full[:vis_cap] if items_full else []
         tc = session.setdefault("product_thumb_cache", {})
         for it in items:
             if isinstance(it, dict):
@@ -3176,7 +3577,7 @@ def main(page: ft.Page):
                 if ip and isinstance(tc.get(ip), str):
                     it["_display_image"] = tc[ip]
         col.controls.clear()
-        if not items:
+        if not items_full:
             loading = bool((session.get("quick_catalog_loading") or {}).get(active_tab))
             loaded = bool((session.get("quick_catalog_loaded") or {}).get(active_tab))
             if loading:
@@ -3197,6 +3598,18 @@ def main(page: ft.Page):
                 page.update()
             return
         _append_products_grid(col, items)
+        if items_full and len(items_full) > vis_cap:
+            rest = len(items_full) - vis_cap
+            step = min(QUICK_CATALOG_PAGE_SIZE, rest)
+            col.controls.append(
+                ft.Container(
+                    padding=ft.Padding.only(left=8, right=8, top=4, bottom=8),
+                    content=ft.TextButton(
+                        f"Показать ещё (+{step})",
+                        on_click=_on_quick_catalog_show_more,
+                    ),
+                )
+            )
         if flush:
             page.update()
 
@@ -3238,12 +3651,34 @@ def main(page: ft.Page):
                     cache_pool, tab, QUICK_CATALOG_LIMIT
                 )
                 loaded_map[tab] = True
+                _pl_off = products_map[tab] or []
+                _vc_off = session.setdefault("quick_catalog_visible_count", {})
+                _vc_off[tab] = (
+                    min(QUICK_CATALOG_PAGE_SIZE, len(_pl_off)) if _pl_off else QUICK_CATALOG_PAGE_SIZE
+                )
                 q_after = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
                 if len(q_after) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
                     _render_quick_catalog(products_map.get(tab) or [], tab)
-                if client.access and products_map.get(tab):
-                    page.run_task(_hydrate_product_thumbs, products_map[tab], f"c:{tab}")
+                if products_map.get(tab):
+                    _schedule_hydrate_quick_catalog_thumbs(tab)
                 return
+
+            # Онлайн: сразу показываем локальный кэш, чтобы не ждать удалённый каталог.
+            if cache_pool:
+                products_map[tab] = _sort_quick_catalog_products(
+                    cache_pool, tab, QUICK_CATALOG_LIMIT
+                )
+                _pl_cache = products_map[tab] or []
+                _vc_cache = session.setdefault("quick_catalog_visible_count", {})
+                _vc_cache[tab] = (
+                    min(QUICK_CATALOG_PAGE_SIZE, len(_pl_cache))
+                    if _pl_cache
+                    else QUICK_CATALOG_PAGE_SIZE
+                )
+                q_cache = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
+                if len(q_cache) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
+                    _render_quick_catalog(products_map.get(tab) or [], tab)
+                _schedule_hydrate_quick_catalog_thumbs(tab)
 
             presets = QUICK_CATALOG_PRESETS.get(tab, ())
             merged_pool: list[dict[str, Any]] = [dict(p) for p in cache_pool]
@@ -3317,6 +3752,8 @@ def main(page: ft.Page):
                                 pass
 
                 for spec in unresolved:
+                    if len(seen_ids) >= QUICK_CATALOG_LIMIT:
+                        break
                     found2 = _pick_quick_catalog_match(spec, merged_pool, tab)
                     if found2:
                         pid = str(found2.get("id") or "").strip()
@@ -3326,6 +3763,8 @@ def main(page: ft.Page):
                             continue
                     q_iter = spec[1][1:] if found2 else spec[1]
                     for query in q_iter:
+                        if len(seen_ids) >= QUICK_CATALOG_LIMIT:
+                            break
                         try:
                             rows = await asyncio.to_thread(
                                 client.products_search, query, 20
@@ -3364,12 +3803,17 @@ def main(page: ft.Page):
             ]
             products_map[tab] = final[:QUICK_CATALOG_LIMIT]
             loaded_map[tab] = True
+            _pl_on = products_map[tab] or []
+            _vc_on = session.setdefault("quick_catalog_visible_count", {})
+            _vc_on[tab] = (
+                min(QUICK_CATALOG_PAGE_SIZE, len(_pl_on)) if _pl_on else QUICK_CATALOG_PAGE_SIZE
+            )
 
             q_after = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
             if len(q_after) < 2 and str(session.get("quick_catalog_tab") or "kg") == tab:
                 _render_quick_catalog(products_map.get(tab) or [], tab)
-            if client.access and products_map.get(tab):
-                page.run_task(_hydrate_product_thumbs, products_map[tab], f"c:{tab}")
+            if products_map.get(tab):
+                _schedule_hydrate_quick_catalog_thumbs(tab)
         finally:
             loading_map[tab] = False
             q_fin = (search_field_ref.current.value or "").strip() if search_field_ref.current else ""
@@ -3893,6 +4337,7 @@ def main(page: ft.Page):
                         session["active_shift_id"] = None
                         session["cart_id"] = None
                         session["cart"] = {}
+                        session["cart_line_unit_overrides"] = {}
                         _persist_offline_session()
                         render_cart_items()
                         snack("Смена закрыта", ft.Colors.GREEN_700)
@@ -4054,6 +4499,7 @@ def main(page: ft.Page):
                         snack(f"Печать чека: {ex}", ft.Colors.AMBER_700)
                 session["cart_id"] = None
                 session["cart"] = {}
+                session["cart_line_unit_overrides"] = {}
                 refresh_pos_mode_ui(flush=False)
                 try_start_sale()
                 return
@@ -4137,6 +4583,7 @@ def main(page: ft.Page):
                         snack(f"Печать чека: {ex}", ft.Colors.AMBER_700)
                 session["cart_id"] = None
                 session["cart"] = {}
+                session["cart_line_unit_overrides"] = {}
                 try_start_sale()
 
             page.run_task(_checkout_async)
@@ -4478,6 +4925,10 @@ def main(page: ft.Page):
         session["quick_catalog_products"] = {"kg": [], "common": []}
         session["quick_catalog_loading"] = {"kg": False, "common": False}
         session["quick_catalog_loaded"] = {"kg": False, "common": False}
+        session["quick_catalog_visible_count"] = {
+            "kg": QUICK_CATALOG_PAGE_SIZE,
+            "common": QUICK_CATALOG_PAGE_SIZE,
+        }
         page.on_keyboard_event = on_global_keyboard
         page.controls.clear()
         page.add(build_cashier())
@@ -4521,6 +4972,7 @@ def main(page: ft.Page):
         client.clear()
         session["cart_id"] = None
         session["cart"] = {}
+        session["cart_line_unit_overrides"] = {}
         session["needs_shift"] = False
         session["pos_cashbox_id"] = None
         session["active_shift_id"] = None
@@ -5064,6 +5516,10 @@ def main(page: ft.Page):
                 session["quick_catalog_products"] = {"kg": [], "common": []}
                 session["quick_catalog_loading"] = {"kg": False, "common": False}
                 session["quick_catalog_loaded"] = {"kg": False, "common": False}
+                session["quick_catalog_visible_count"] = {
+                    "kg": QUICK_CATALOG_PAGE_SIZE,
+                    "common": QUICK_CATALOG_PAGE_SIZE,
+                }
                 active_tab = str(session.get("quick_catalog_tab") or "kg")
                 _render_quick_catalog([], active_tab)
                 page.run_task(_load_quick_catalog, active_tab, True)
@@ -5620,10 +6076,11 @@ def main(page: ft.Page):
                         bgcolor=UI_ACCENT,
                         border_radius=10,
                         alignment=ft.Alignment.CENTER,
-                        content=ft.Icon(
-                            ft.Icons.STOREFRONT_OUTLINED,
-                            color=UI_TEXT_ON_YELLOW,
-                            size=22,
+                        content=ft.Image(
+                            src=_runtime_asset_path("assets", "header_logo.png"),
+                            width=28,
+                            height=28,
+                            fit=ft.BoxFit.CONTAIN,
                         ),
                     ),
                     ft.Container(width=12),
