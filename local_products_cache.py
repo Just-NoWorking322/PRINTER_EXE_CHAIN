@@ -586,6 +586,43 @@ def ingest_cart(branch_id: str | None, cart: dict[str, Any]) -> None:
             c.close()
 
 
+KV_CATALOG_FULL_SYNC = "pos_catalog_full_sync_v1"
+
+
+def is_catalog_full_synced(branch_id: str | None) -> bool:
+    """По филиалу уже выполнялась полная выгрузка каталога в SQLite — дальше можно не дёргать list/ на каждый заход."""
+    if not _enabled():
+        return False
+    import app_database
+    import json
+
+    app_database.init_database()
+    raw = app_database.kv_get(KV_CATALOG_FULL_SYNC)
+    if not raw:
+        return False
+    try:
+        d = json.loads(raw)
+        return str(d.get("branch_id") or "") == _branch_key(branch_id) and bool(d.get("ok"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+
+
+def set_catalog_full_synced(branch_id: str | None) -> None:
+    if not _enabled():
+        return
+    import app_database
+    import json
+
+    app_database.init_database()
+    app_database.kv_set(
+        KV_CATALOG_FULL_SYNC,
+        json.dumps(
+            {"branch_id": _branch_key(branch_id), "ok": True, "at": time.time()},
+            ensure_ascii=False,
+        ),
+    )
+
+
 def _name_from_item(it: dict[str, Any]) -> str | None:
     for k in ("product_name", "name", "title", "display_name"):
         v = it.get(k)

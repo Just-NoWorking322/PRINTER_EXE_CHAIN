@@ -176,6 +176,8 @@ def validate_product_id(raw: Any) -> str:
 
 def normalize_barcode_for_scan(barcode: str, *, max_len: int = 64) -> tuple[str, str]:
     s = (barcode or "").strip()
+    s = re.sub(r"[\x00-\x1f\x7f]", "", s)
+    s = s.replace("\ufeff", "").strip()
     if not s:
         return "", "Пустой штрихкод"
     if len(s) > max_len:

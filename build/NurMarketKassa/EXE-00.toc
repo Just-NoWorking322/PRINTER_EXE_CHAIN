@@ -82,73 +82,57 @@
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\main.py',
    'PYSOURCE'),
-  ('flet_desktop\\app\\flet\\libEGL.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\libEGL.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\vk_swiftshader.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\vk_swiftshader.dll',
-   'BINARY'),
   ('flet_desktop\\app\\flet\\battery_plus_plugin.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\battery_plus_plugin.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\vulkan-1.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\vulkan-1.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\libmpv-2.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\libmpv-2.dll',
    'BINARY'),
   ('flet_desktop\\app\\flet\\share_plus_plugin.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\share_plus_plugin.dll',
    'BINARY'),
-  ('flet_desktop\\app\\flet\\window_to_front_plugin.dll',
+  ('flet_desktop\\app\\flet\\libGLESv2.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\window_to_front_plugin.dll',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\libGLESv2.dll',
    'BINARY'),
-  ('flet_desktop\\app\\flet\\geolocator_windows_plugin.dll',
+  ('flet_desktop\\app\\flet\\libmpv-2.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\geolocator_windows_plugin.dll',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\libmpv-2.dll',
    'BINARY'),
-  ('flet_desktop\\app\\flet\\media_kit_libs_windows_video_plugin.dll',
+  ('flet_desktop\\app\\flet\\pasteboard_plugin.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\media_kit_libs_windows_video_plugin.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\media_kit_video_plugin.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\media_kit_video_plugin.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\record_windows_plugin.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\record_windows_plugin.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\flutter_secure_storage_windows_plugin.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\flutter_secure_storage_windows_plugin.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\flutter_windows.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\flutter_windows.dll',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\pasteboard_plugin.dll',
    'BINARY'),
   ('flet_desktop\\app\\flet\\screen_retriever_windows_plugin.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\screen_retriever_windows_plugin.dll',
    'BINARY'),
-  ('flet_desktop\\app\\flet\\url_launcher_windows_plugin.dll',
+  ('flet_desktop\\app\\flet\\vk_swiftshader.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\url_launcher_windows_plugin.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\vcruntime140_1.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\vcruntime140_1.dll',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\vk_swiftshader.dll',
    'BINARY'),
   ('flet_desktop\\app\\flet\\audioplayers_windows_plugin.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\audioplayers_windows_plugin.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\rive_native.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\rive_native.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\media_kit_video_plugin.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\media_kit_video_plugin.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\flet.exe',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\flet.exe',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\window_to_front_plugin.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\window_to_front_plugin.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\url_launcher_windows_plugin.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\url_launcher_windows_plugin.dll',
    'BINARY'),
   ('flet_desktop\\app\\flet\\msvcp140.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
@@ -158,49 +142,65 @@
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\window_manager_plugin.dll',
    'BINARY'),
-  ('flet_desktop\\app\\flet\\d3dcompiler_47.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\d3dcompiler_47.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\flet.exe',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\flet.exe',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\zlib.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\zlib.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\permission_handler_windows_plugin.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\permission_handler_windows_plugin.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\pasteboard_plugin.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\pasteboard_plugin.dll',
-   'BINARY'),
   ('flet_desktop\\app\\flet\\rive_native_plugin.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\rive_native_plugin.dll',
    'BINARY'),
-  ('flet_desktop\\app\\flet\\rive_native.dll',
+  ('flet_desktop\\app\\flet\\media_kit_libs_windows_video_plugin.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\rive_native.dll',
-   'BINARY'),
-  ('flet_desktop\\app\\flet\\libGLESv2.dll',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\libGLESv2.dll',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\media_kit_libs_windows_video_plugin.dll',
    'BINARY'),
   ('flet_desktop\\app\\flet\\screen_brightness_windows_plugin.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\screen_brightness_windows_plugin.dll',
    'BINARY'),
-  ('flet_desktop\\app\\flet\\vcruntime140.dll',
+  ('flet_desktop\\app\\flet\\permission_handler_windows_plugin.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\vcruntime140.dll',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\permission_handler_windows_plugin.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\flutter_secure_storage_windows_plugin.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\flutter_secure_storage_windows_plugin.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\flutter_windows.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\flutter_windows.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\libEGL.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\libEGL.dll',
    'BINARY'),
   ('flet_desktop\\app\\flet\\connectivity_plus_plugin.dll',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\connectivity_plus_plugin.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\vulkan-1.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\vulkan-1.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\geolocator_windows_plugin.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\geolocator_windows_plugin.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\vcruntime140.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\vcruntime140.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\d3dcompiler_47.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\d3dcompiler_47.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\zlib.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\zlib.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\vcruntime140_1.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\vcruntime140_1.dll',
+   'BINARY'),
+  ('flet_desktop\\app\\flet\\record_windows_plugin.dll',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\record_windows_plugin.dll',
    'BINARY'),
   ('python311.dll',
    'C:\\Program '
@@ -358,69 +358,77 @@
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\certifi\\cacert.pem',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\wakelock_plus\\assets\\no_sleep.js',
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Fraktur-Bold.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\wakelock_plus\\assets\\no_sleep.js',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Fraktur-Bold.ttf',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Script-Regular.ttf',
+  ('flet\\controls\\material\\icons.json',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Script-Regular.ttf',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet\\controls\\material\\icons.json',
    'DATA'),
-  ('flet\\controls\\cupertino\\cupertino_icons.json',
+  ('flet_desktop\\app\\flet\\data\\app.so',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet\\controls\\cupertino\\cupertino_icons.json',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Italic.ttf',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Italic.ttf',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Typewriter-Regular.ttf',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Typewriter-Regular.ttf',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\shaders\\ink_sparkle.frag',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\shaders\\ink_sparkle.frag',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Math-Italic.ttf',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Math-Italic.ttf',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Regular.ttf',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Regular.ttf',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\media_kit\\assets\\web\\hls1.4.10.js',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\media_kit\\assets\\web\\hls1.4.10.js',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\record_web\\assets\\js\\record.fixwebmduration.js',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\record_web\\assets\\js\\record.fixwebmduration.js',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size2-Regular.ttf',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size2-Regular.ttf',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\icudtl.dat',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\icudtl.dat',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\fonts\\MaterialIcons-Regular.otf',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\fonts\\MaterialIcons-Regular.otf',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\app.so',
    'DATA'),
   ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Math-BoldItalic.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Math-BoldItalic.ttf',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Italic.ttf',
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size2-Regular.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Italic.ttf',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size2-Regular.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\NOTICES.Z',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\NOTICES.Z',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Script-Regular.ttf',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Script-Regular.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size3-Regular.ttf',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size3-Regular.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\media_kit\\assets\\web\\hls1.4.10.js',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\media_kit\\assets\\web\\hls1.4.10.js',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Italic.ttf',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Italic.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\FontManifest.json',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\FontManifest.json',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Math-Italic.ttf',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Math-Italic.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_map\\lib\\assets\\flutter_map_logo.png',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_map\\lib\\assets\\flutter_map_logo.png',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Bold.ttf',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Bold.ttf',
    'DATA'),
   ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size1-Regular.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size1-Regular.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Regular.ttf',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Regular.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Bold.ttf',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Bold.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\NativeAssetsManifest.json',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\NativeAssetsManifest.json',
    'DATA'),
   ('flet_desktop\\app\\flet\\data\\flutter_assets\\AssetManifest.bin',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
@@ -430,101 +438,93 @@
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\shaders\\stretch_effect.frag',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size3-Regular.ttf',
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-BoldItalic.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size3-Regular.ttf',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-BoldItalic.ttf',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_AMS-Regular.ttf',
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Typewriter-Regular.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_AMS-Regular.ttf',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Typewriter-Regular.ttf',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\app.so',
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\fonts\\MaterialIcons-Regular.otf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\app.so',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\fonts\\MaterialIcons-Regular.otf',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Caligraphic-Bold.ttf',
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\record_web\\assets\\js\\record.fixwebmduration.js',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Caligraphic-Bold.ttf',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\record_web\\assets\\js\\record.fixwebmduration.js',
    'DATA'),
-  ('flet\\controls\\material\\icons.json',
+  ('flet_desktop\\app\\flet\\data\\icudtl.dat',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet\\controls\\material\\icons.json',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Caligraphic-Regular.ttf',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Caligraphic-Regular.ttf',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\icudtl.dat',
    'DATA'),
   ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size4-Regular.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Size4-Regular.ttf',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Fraktur-Regular.ttf',
+  ('flet\\controls\\cupertino\\cupertino_icons.json',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Fraktur-Regular.ttf',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet\\controls\\cupertino\\cupertino_icons.json',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Regular.ttf',
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_AMS-Regular.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Regular.ttf',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_AMS-Regular.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Caligraphic-Bold.ttf',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Caligraphic-Bold.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Italic.ttf',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Italic.ttf',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Regular.ttf',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Regular.ttf',
    'DATA'),
   ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\record_web\\assets\\js\\record.worklet.js',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\record_web\\assets\\js\\record.worklet.js',
    'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\wakelock_plus\\assets\\no_sleep.js',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\wakelock_plus\\assets\\no_sleep.js',
+   'DATA'),
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\shaders\\ink_sparkle.frag',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\shaders\\ink_sparkle.frag',
+   'DATA'),
   ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\cupertino_icons\\assets\\CupertinoIcons.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\cupertino_icons\\assets\\CupertinoIcons.ttf',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-BoldItalic.ttf',
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Fraktur-Regular.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-BoldItalic.ttf',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Fraktur-Regular.ttf',
    'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Bold.ttf',
+  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Caligraphic-Regular.ttf',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Main-Bold.ttf',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\NOTICES.Z',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\NOTICES.Z',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\NativeAssetsManifest.json',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\NativeAssetsManifest.json',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_map\\lib\\assets\\flutter_map_logo.png',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_map\\lib\\assets\\flutter_map_logo.png',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Fraktur-Bold.ttf',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Fraktur-Bold.ttf',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\FontManifest.json',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\FontManifest.json',
-   'DATA'),
-  ('flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Bold.ttf',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_SansSerif-Bold.ttf',
-   'DATA'),
-  ('click-8.3.1.dist-info\\WHEEL',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\click-8.3.1.dist-info\\WHEEL',
-   'DATA'),
-  ('click-8.3.1.dist-info\\RECORD',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\click-8.3.1.dist-info\\RECORD',
-   'DATA'),
-  ('click-8.3.1.dist-info\\METADATA',
-   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
-   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\click-8.3.1.dist-info\\METADATA',
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\flet_desktop\\app\\flet\\data\\flutter_assets\\packages\\flutter_math_fork\\lib\\katex_fonts\\fonts\\KaTeX_Caligraphic-Regular.ttf',
    'DATA'),
   ('click-8.3.1.dist-info\\licenses\\LICENSE.txt',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\click-8.3.1.dist-info\\licenses\\LICENSE.txt',
    'DATA'),
+  ('click-8.3.1.dist-info\\WHEEL',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\click-8.3.1.dist-info\\WHEEL',
+   'DATA'),
   ('click-8.3.1.dist-info\\INSTALLER',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\click-8.3.1.dist-info\\INSTALLER',
+   'DATA'),
+  ('click-8.3.1.dist-info\\METADATA',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\click-8.3.1.dist-info\\METADATA',
+   'DATA'),
+  ('click-8.3.1.dist-info\\RECORD',
+   'C:\\Users\\TechLine\\OneDrive\\Рабочий '
+   'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\click-8.3.1.dist-info\\RECORD',
    'DATA'),
   ('base_library.zip',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
@@ -533,7 +533,7 @@
  [],
  False,
  False,
- 1775210034,
+ 1775217591,
  [('runw.exe',
    'C:\\Users\\TechLine\\OneDrive\\Рабочий '
    'стол\\принтер_для_next\\PRINTER_EXE_CHAIN\\venv\\Lib\\site-packages\\PyInstaller\\bootloader\\Windows-64bit-intel\\runw.exe',

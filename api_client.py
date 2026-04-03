@@ -333,8 +333,8 @@ class JwtClient:
             "POST",
             f"/api/main/pos/sales/{cart_id}/scan/",
             json_body=body,
-            # Короткий connect, умеренный read — быстрее отказ при обрыве; keep-alive в Session.
-            timeout=(4, 32),
+            # Короткий connect, read — быстрый отказ при подвисании сети (касса не «думает» минуту).
+            timeout=(3, 22),
         )
 
     def pos_add_item(
@@ -356,7 +356,7 @@ class JwtClient:
             "POST",
             f"/api/main/pos/sales/{cart_id}/add-item/",
             json_body=body,
-            timeout=(5, 45),
+            timeout=(3, 28),
         )
 
     def pos_cart_item_patch(self, cart_id: str, item_id: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -550,3 +550,52 @@ class JwtClient:
         if last_err:
             raise last_err
         return out[:limit]
+
+    def products_catalog_full(
+        self,
+        *,
+        max_pages: int = 80,
+        max_items: int = 100_000,
+    ) -> list:
+        """
+        Все страницы каталога до пустой страницы или лимита — для первичного заполнения локальной базы.
+        """
+        out: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        last_err: ApiError | None = None
+        candidates: tuple[str, ...] = (
+            "/api/main/products/list/",
+            "/api/main/products/",
+        )
+        mp = max(1, int(max_pages))
+        cap = max(1, int(max_items))
+        for path in candidates:
+            out.clear()
+            seen_ids.clear()
+            try:
+                for page in range(1, mp + 1):
+                    data = self._request("GET", path, params={"page": page})
+                    items = unwrap_list(data)
+                    if not isinstance(items, list) or len(items) == 0:
+                        break
+                    for p in items:
+                        if not isinstance(p, dict):
+                            continue
+                        pid = p.get("id")
+                        pid_s = str(pid).strip() if pid is not None else ""
+                        if not pid_s or pid_s in seen_ids:
+                            continue
+                        seen_ids.add(pid_s)
+                        out.append(p)
+                        if len(out) >= cap:
+                            return out
+                if out:
+                    return out
+            except ApiError as e:
+                last_err = e
+                if e.status_code == 404:
+                    continue
+                raise
+        if last_err:
+            raise last_err
+        return out

@@ -6,7 +6,10 @@ DESKTOP_MARKET_SCALE_ENABLED — 0 отключает блок весов.
 DESKTOP_MARKET_RECEIPT_USE_API_TEXT — 1: печатать сырой текст чека с API; иначе — оформленный локальный макет.
 DESKTOP_MARKET_RECEIPT_COERCE_CP866_TABLE — 1: при CP866 принудительно ESC t 17 вместо 46 (по умолчанию выкл.).
 DESKTOP_MARKET_LOW_SPEC — 1: режим слабого ПК (меньше товаров в быстром каталоге, меньше параллельных превью, реже опрос синка).
+DESKTOP_MARKET_FLAT_UI — 1: без теней у карточек, быстрее отрисовка на слабом GPU (часто моноблоки); можно вместе с LOW_SPEC.
 DESKTOP_MARKET_DISABLE_CATALOG_IMAGES — 1: не подгружать фото в сетке товаров.
+DESKTOP_MARKET_CATALOG_FULL_SYNC_PAGES — сколько страниц list/ тянуть при первой полной синхронизации в SQLite (по умолчанию 80).
+DESKTOP_MARKET_CATALOG_FULL_SYNC_MAX_ITEMS — верхний предел строк при полной синхронизации (по умолчанию 100000).
 """
 
 from __future__ import annotations
@@ -559,7 +562,8 @@ def _fetch_receipt_text_via_api(client: JwtClient, sale_id: Any) -> str | None:
 
 
 # Сканер HID: между символами обычно < 50 ms; пауза больше порога — новый штрих (не сливаем два скана).
-BARCODE_INTERKEY_RESET_MS = 100
+# 100 ms давало обрыв длинных EAN на медленном USB/фоновой нагрузке → «нет такого товара».
+BARCODE_INTERKEY_RESET_MS = 220
 BARCODE_BUFFER_MAX_LEN = 64
 MIN_BARCODE_LEN = 4
 # Поле поиска: не дергать живой поиск по длинной строке «только цифры» (сканер в фокусе поля).
@@ -570,12 +574,22 @@ OFFLINE_SYNC_POLL_SEC = config.pos_performance_offline_sync_poll()
 # NUR CRM: три колонки, тёмный бренд-бар сверху, акцент #f7d617
 UI_BRAND = "#f7d617"
 UI_BG = "#f5f5f5"
-_COLUMN_CARD_SHADOW = ft.BoxShadow(
-    blur_radius=15,
-    spread_radius=1,
-    color=ft.Colors.with_opacity(0.12, "#000000"),
-    offset=ft.Offset(0, 4),
-)
+def _column_card_shadow() -> ft.BoxShadow | None:
+    """Тени дают blur на GPU; на моноблоках без дискретной видеокарты отключаем (DESKTOP_MARKET_FLAT_UI или LOW_SPEC)."""
+    if config.ui_flat_mode():
+        return None
+    return ft.BoxShadow(
+        blur_radius=15,
+        spread_radius=1,
+        color=ft.Colors.with_opacity(0.12, "#000000"),
+        offset=ft.Offset(0, 4),
+    )
+
+
+def _catalog_image_filter_kw() -> dict[str, Any]:
+    if config.ui_flat_mode() or config.LOW_SPEC_MODE:
+        return {"filter_quality": ft.FilterQuality.LOW}
+    return {}
 UI_SIDEBAR = "#111827"
 UI_SIDEBAR_MUTED = "#9ca3af"
 UI_SIDEBAR_TEXT = "#e5e7eb"
@@ -785,6 +799,36 @@ def _is_enter_key(key: str) -> bool:
     return k in ("Enter", "Return", "NumpadEnter", "Select")
 
 
+def _api_error_cart_not_found(ex: ApiError) -> bool:
+    """
+    404 от API в духе «No Cart matches the given query» — неверный/устаревший id корзины в сессии,
+    а не отсутствие товара по штрихкоду.
+    """
+    if ex.status_code != 404:
+        return False
+    parts = [str(ex)]
+    if isinstance(ex.payload, dict):
+        parts.append(str(ex.payload.get("detail") or ""))
+    blob = " ".join(parts).lower()
+    if "product" in blob and "cart" not in blob:
+        return False
+    return (
+        "no cart" in blob
+        or "корзин" in blob
+        or ("cart" in blob and "match" in blob)
+        or ("cart" in blob and "not found" in blob)
+    )
+
+
+def _humanize_cart_scan_error(ex: ApiError) -> str:
+    if _api_error_cart_not_found(ex):
+        return (
+            "Корзина на сервере не найдена (сессия устарела). "
+            "Нажмите «Начать продажу» или отсканируйте штрихкод ещё раз."
+        )
+    return str(ex)
+
+
 def _windows_pre_ui_init() -> None:
     """
     Вызывать до ft.run: DPI awareness на Windows (чёткие шрифты при масштабе экрана ≠ 100%%).
@@ -901,6 +945,7 @@ def main(page: ft.Page):
             "main_split": {"left": 11, "right": 16, "left_frac": 11.0},
         },
     }
+    catalog_full_sync_lock = asyncio.Lock()
 
     error_text = ft.Ref[ft.Text]()
     loading_overlay = ft.Ref[ft.Container]()
@@ -913,7 +958,6 @@ def main(page: ft.Page):
     search_results_ref = ft.Ref[ft.Column]()
     # Подсказки/ошибки на экране кассы (поле error_text есть только на логине — их не было видно).
     cashier_hint_ref = ft.Ref[ft.Text]()
-    status_chip = ft.Ref[ft.Text]()
     pos_mode_ref = ft.Ref[ft.Text]()
     sync_status_ref = ft.Ref[ft.Text]()
     order_discount_pct_ref = ft.Ref[ft.TextField]()
@@ -935,6 +979,10 @@ def main(page: ft.Page):
         "title": "",
         "submit_text": "Готово",
         "submit": None,
+        # "center" — снизу по центру (касса); "right" — снизу справа.
+        "dock": "center",
+        # Доп. отступ снизу (px): поднимает панель выше края экрана.
+        "bottom_lift": 0.0,
     }
     # Весы: по умолчанию включены; отключить: DESKTOP_MARKET_SCALE_ENABLED=0
     _scale_env = os.environ.get("DESKTOP_MARKET_SCALE_ENABLED", "1").strip().lower()
@@ -1141,7 +1189,7 @@ def main(page: ft.Page):
     _VK_PANEL_WIDTH = 460
     _VK_PANEL_EST_HEIGHT = 300
     _VK_MARGIN = 8.0
-    _UI_PAN_DRAG_INTERVAL_MS = 0
+    _vk_resize_task_seq = [0]
 
     def _window_size_wh() -> tuple[float, float]:
         try:
@@ -1163,17 +1211,21 @@ def main(page: ft.Page):
     def _vk_anchor_if_needed() -> None:
         d = session["ui_pos"]["vk"]
         cw, ch = _vk_content_wh()
-        if d.get("left") is None:
+        dock = str(virtual_keyboard_state.get("dock") or "center")
+        if dock == "right":
+            d["left"] = max(_VK_MARGIN, cw - float(_VK_PANEL_WIDTH) - _VK_MARGIN)
+        else:
             d["left"] = max(_VK_MARGIN, (cw - float(_VK_PANEL_WIDTH)) / 2.0)
-        if d.get("bottom") is None:
-            d["bottom"] = _VK_MARGIN
+        lift = float(virtual_keyboard_state.get("bottom_lift") or 0.0)
+        d["bottom"] = _VK_MARGIN + max(0.0, lift)
 
     def _vk_clamp_pos_apply() -> None:
         d = session["ui_pos"]["vk"]
         _vk_anchor_if_needed()
         cw, ch = _vk_content_wh()
         L = max(_VK_MARGIN, min(float(d["left"]), cw - float(_VK_PANEL_WIDTH) - _VK_MARGIN))
-        min_b = _VK_MARGIN
+        lift = float(virtual_keyboard_state.get("bottom_lift") or 0.0)
+        min_b = _VK_MARGIN + max(0.0, lift)
         max_b = max(min_b, ch - float(_VK_PANEL_EST_HEIGHT) - _VK_MARGIN)
         B = max(min_b, min(float(d["bottom"]), max_b))
         d["left"], d["bottom"] = L, B
@@ -1189,49 +1241,22 @@ def main(page: ft.Page):
             box["h"] = float(e.height)
         except (TypeError, ValueError, AttributeError):
             return
-        if virtual_keyboard_state.get("visible"):
+        if not virtual_keyboard_state.get("visible"):
+            return
+        _vk_resize_task_seq[0] += 1
+        seq = _vk_resize_task_seq[0]
+
+        async def _apply_resize() -> None:
+            await asyncio.sleep(0.12)
+            if _vk_resize_task_seq[0] != seq:
+                return
             _vk_clamp_pos_apply()
             try:
                 page.update()
             except RuntimeError:
                 pass
 
-    def _vk_pan_start(_e: Any) -> None:
-        d = session["ui_pos"]["vk"]
-        _vk_anchor_if_needed()
-        virtual_keyboard_state["_vk_pan_L0"] = float(d["left"])
-        virtual_keyboard_state["_vk_pan_B0"] = float(d["bottom"])
-        virtual_keyboard_state["_vk_pan_acc_x"] = 0.0
-        virtual_keyboard_state["_vk_pan_acc_y"] = 0.0
-
-    def _vk_pan_update(e: Any) -> None:
-        dx, dy = _pan_delta_xy(e)
-        virtual_keyboard_state["_vk_pan_acc_x"] = float(
-            virtual_keyboard_state.get("_vk_pan_acc_x") or 0.0
-        ) + dx
-        virtual_keyboard_state["_vk_pan_acc_y"] = float(
-            virtual_keyboard_state.get("_vk_pan_acc_y") or 0.0
-        ) + dy
-        L0 = float(virtual_keyboard_state.get("_vk_pan_L0") or 0.0)
-        B0 = float(virtual_keyboard_state.get("_vk_pan_B0") or 0.0)
-        acc_x = float(virtual_keyboard_state.get("_vk_pan_acc_x") or 0.0)
-        acc_y = float(virtual_keyboard_state.get("_vk_pan_acc_y") or 0.0)
-        d = session["ui_pos"]["vk"]
-        d["left"] = L0 + acc_x
-        d["bottom"] = B0 - acc_y
-        _vk_clamp_pos_apply()
-        try:
-            page.update()
-        except RuntimeError:
-            pass
-
-    def _vk_pan_end(_e: Any = None) -> None:
-        for k in ("_vk_pan_L0", "_vk_pan_B0", "_vk_pan_acc_x", "_vk_pan_acc_y"):
-            virtual_keyboard_state.pop(k, None)
-        try:
-            page.update()
-        except RuntimeError:
-            pass
+        page.run_task(_apply_resize)
 
     def _vk_initial_layout(mode: str) -> str:
         m = (mode or "text").strip().lower()
@@ -1274,6 +1299,8 @@ def main(page: ft.Page):
     def hide_virtual_keyboard(_e=None) -> None:
         virtual_keyboard_state["visible"] = False
         virtual_keyboard_state["target"] = None
+        virtual_keyboard_state["dock"] = "center"
+        virtual_keyboard_state["bottom_lift"] = 0.0
         for k in ("_vk_grab", "_vk_pan_L0", "_vk_pan_B0", "_vk_pan_acc_x", "_vk_pan_acc_y"):
             virtual_keyboard_state.pop(k, None)
         host = virtual_keyboard_host.current
@@ -1408,35 +1435,27 @@ def main(page: ft.Page):
         rows: list[ft.Control] = []
         title = str(virtual_keyboard_state.get("title") or "Ввод")
         subtitle = "Русская раскладка" if layout == "ru" else ("English layout" if layout == "en" else "Цифры")
-        drag_head = ft.GestureDetector(
-            mouse_cursor=ft.MouseCursor.GRAB,
-            drag_interval=_UI_PAN_DRAG_INTERVAL_MS,
-            on_pan_start=_vk_pan_start,
-            on_pan_update=_vk_pan_update,
-            on_pan_end=_vk_pan_end,
-            content=ft.Container(
-                padding=ft.Padding.only(right=4, bottom=2),
-                content=ft.Column(
-                    [
-                        ft.Row(
-                            [
-                                ft.Icon(ft.Icons.DRAG_INDICATOR, size=14, color=UI_SIDEBAR_TEXT),
-                                ft.Text(title, size=11, weight=ft.FontWeight.W_600, color=UI_SURFACE),
-                            ],
-                            spacing=4,
-                            tight=True,
-                        ),
-                        ft.Text(subtitle, size=8, color=UI_SIDEBAR_TEXT),
-                        ft.Text("Потяните за заголовок, чтобы сдвинуть панель", size=7, color=UI_SIDEBAR_TEXT),
-                    ],
-                    spacing=1,
-                    tight=True,
-                ),
+        head_col = ft.Container(
+            padding=ft.Padding.only(right=4, bottom=2),
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.KEYBOARD_OUTLINED, size=14, color=UI_SIDEBAR_TEXT),
+                            ft.Text(title, size=11, weight=ft.FontWeight.W_600, color=UI_SURFACE),
+                        ],
+                        spacing=4,
+                        tight=True,
+                    ),
+                    ft.Text(subtitle, size=8, color=UI_SIDEBAR_TEXT),
+                ],
+                spacing=1,
+                tight=True,
             ),
         )
         toolbar = ft.Row(
             [
-                drag_head,
+                head_col,
                 ft.Container(expand=True),
                 _vk_build_button("LAYOUT_RU", active=layout == "ru"),
                 _vk_build_button("LAYOUT_EN", active=layout == "en"),
@@ -1535,6 +1554,12 @@ def main(page: ft.Page):
         virtual_keyboard_state["title"] = str(meta.get("title") or getattr(field, "label", None) or "Ввод")
         virtual_keyboard_state["submit_text"] = str(meta.get("submit_text") or "Готово")
         virtual_keyboard_state["submit"] = meta.get("submit")
+        dock = str(meta.get("dock") or "center").strip().lower()
+        virtual_keyboard_state["dock"] = dock if dock in ("center", "right") else "center"
+        try:
+            virtual_keyboard_state["bottom_lift"] = float(meta.get("bottom_lift") or 0.0)
+        except (TypeError, ValueError):
+            virtual_keyboard_state["bottom_lift"] = 0.0
         _vk_render()
 
     def bind_virtual_keyboard(
@@ -1544,6 +1569,8 @@ def main(page: ft.Page):
         title: str = "",
         submit: Any = None,
         submit_text: str = "Готово",
+        dock: str = "center",
+        bottom_lift: float = 0.0,
     ) -> ft.TextField:
         prev_focus = getattr(field, "on_focus", None)
 
@@ -1553,11 +1580,18 @@ def main(page: ft.Page):
             show_virtual_keyboard(field)
 
         field.on_focus = _on_focus
+        _d = str(dock or "center").strip().lower()
+        try:
+            _lift = float(bottom_lift)
+        except (TypeError, ValueError):
+            _lift = 0.0
         virtual_keyboard_bindings[id(field)] = {
             "mode": mode,
             "title": title,
             "submit": submit,
             "submit_text": submit_text,
+            "dock": _d if _d in ("center", "right") else "center",
+            "bottom_lift": max(0.0, _lift),
         }
         return field
 
@@ -1605,6 +1639,18 @@ def main(page: ft.Page):
         try:
             cart = await asyncio.to_thread(client.pos_cart_get, str(cid))
         except ApiError as ex:
+            # GET /pos/carts/<id>/ — 404 значит id в сессии не существует на сервере.
+            if ex.status_code == 404:
+                session["cart_id"] = None
+                session["cart"] = {}
+                session["cart_line_unit_overrides"] = {}
+                render_cart_items(flush=False)
+                snack(
+                    "Корзина на сервере не найдена — начните продажу заново (кнопка «Начать продажу»).",
+                    ft.Colors.AMBER_700,
+                )
+                page.update()
+                return
             snack(str(ex), ft.Colors.RED_700)
             return
         session["cart"] = cart
@@ -2314,10 +2360,10 @@ def main(page: ft.Page):
                         "Нет позиций — отсканируйте штрихкод или добавьте товар из поиска. "
                         "По строке в чеке можно нажать, чтобы изменить вес, цену и кг/шт.",
                         color=UI_MUTED,
-                        size=14,
+                        size=13,
                         text_align=ft.TextAlign.CENTER,
                     ),
-                    padding=ft.Padding.symmetric(vertical=24, horizontal=8),
+                    padding=ft.Padding.symmetric(vertical=20, horizontal=8),
                     alignment=ft.Alignment.CENTER,
                 )
             )
@@ -2343,7 +2389,7 @@ def main(page: ft.Page):
                 sub_lines = [
                     ft.Text(
                         name,
-                        size=14,
+                        size=13,
                         weight=ft.FontWeight.W_500,
                         color=UI_TEXT,
                         max_lines=2,
@@ -2351,7 +2397,7 @@ def main(page: ft.Page):
                     ),
                     ft.Text(
                         f"{qty} {qty_unit} × {_money(it.get('unit_price'))} сом",
-                        size=12,
+                        size=11,
                         color=UI_MUTED,
                         no_wrap=True,
                     ),
@@ -2360,7 +2406,7 @@ def main(page: ft.Page):
                     sub_lines.append(
                         ft.Text(
                             f"Скидка: {disc_line} сом",
-                            size=11,
+                            size=10,
                             color=UI_WARN_TEXT,
                             no_wrap=True,
                         ),
@@ -2476,7 +2522,7 @@ def main(page: ft.Page):
                                     content=ft.Container(
                                         content=ft.Column(
                                             sub_lines,
-                                            spacing=2,
+                                            spacing=1,
                                             horizontal_alignment=ft.CrossAxisAlignment.START,
                                         ),
                                         expand=True,
@@ -2487,10 +2533,10 @@ def main(page: ft.Page):
                                     [
                                         ft.Text(
                                             f"{line} сом",
-                                            size=15,
+                                            size=14,
                                             weight=ft.FontWeight.W_600,
                                             color=UI_TEXT,
-                                            width=100,
+                                            width=96,
                                             text_align=ft.TextAlign.RIGHT,
                                             no_wrap=True,
                                         ),
@@ -2500,7 +2546,7 @@ def main(page: ft.Page):
                                                     ft.Icons.SCALE_OUTLINED,
                                                     tooltip="Изменить вес",
                                                     icon_color=UI_ACCENT,
-                                                    icon_size=20,
+                                                    icon_size=18,
                                                     style=_icon_btn_style,
                                                     on_click=lambda e, row=it, rid=iid: open_line_item_weight_dialog(
                                                         row, rid
@@ -2514,7 +2560,7 @@ def main(page: ft.Page):
                                             ft.Icons.EDIT_NOTE,
                                             tooltip="Вес, цена, кг/шт",
                                             icon_color=UI_MUTED,
-                                            icon_size=20,
+                                            icon_size=18,
                                             style=_icon_btn_style,
                                             on_click=lambda e, row=it, rid=iid: open_line_item_edit(row, rid),
                                         ),
@@ -2522,7 +2568,7 @@ def main(page: ft.Page):
                                             ft.Icons.REMOVE,
                                             tooltip=tip_minus,
                                             icon_color=UI_MUTED,
-                                            icon_size=20,
+                                            icon_size=18,
                                             style=_icon_btn_style,
                                             on_click=lambda e, d=-1: qty_patch(d),
                                         ),
@@ -2530,7 +2576,7 @@ def main(page: ft.Page):
                                             ft.Icons.ADD,
                                             tooltip=tip_plus,
                                             icon_color=UI_ACCENT,
-                                            icon_size=20,
+                                            icon_size=18,
                                             style=_icon_btn_style,
                                             on_click=lambda e, d=1: qty_patch(d),
                                         ),
@@ -2538,7 +2584,7 @@ def main(page: ft.Page):
                                             ft.Icons.DELETE_OUTLINE,
                                             tooltip="Удалить",
                                             icon_color=UI_MUTED,
-                                            icon_size=20,
+                                            icon_size=18,
                                             style=_icon_btn_style,
                                             on_click=lambda e: remove_item(),
                                         ),
@@ -2551,8 +2597,8 @@ def main(page: ft.Page):
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
-                        padding=ft.Padding.symmetric(vertical=8, horizontal=10),
-                        margin=ft.Margin.only(bottom=6),
+                        padding=ft.Padding.symmetric(vertical=5, horizontal=8),
+                        margin=ft.Margin.only(bottom=4),
                         bgcolor=UI_SURFACE_ELEV,
                         border_radius=12,
                         border=ft.Border.all(1, UI_BORDER),
@@ -2568,17 +2614,6 @@ def main(page: ft.Page):
             discount_txt.current.value = f"{_money(disc)} сом"
         if total_txt.current:
             total_txt.current.value = f"{_money(tot_due)} сом"
-        if status_chip.current:
-            cid = session.get("cart_id")
-            prefix = "Офлайн · " if is_offline_mode() else ""
-            cid_s = str(cid or "").strip()
-            if cid_s.startswith("offline-"):
-                status_text = "Локальная корзина"
-            elif cid_s:
-                status_text = f"Корзина: {cid_s[:8]}…"
-            else:
-                status_text = "Нет активной корзины"
-            status_chip.current.value = f"{prefix}{status_text}"
         sync_order_discount_fields()
         if flush:
             page.update()
@@ -2701,59 +2736,66 @@ def main(page: ft.Page):
         if not cid:
             show_error("Сначала начните продажу (кнопка «Начать продажу»)")
             return
-        # Отменить отложенный живой поиск и очистить поле — меньше лишних запросов и гонок с API.
+        # Отменить отложенный живой поиск и очистить поле — без лишнего page.update до ответа API (быстрее отклик).
         session["search_gen"] = session.get("search_gen", 0) + 1
-        reset_search_panel(flush=True)
+        reset_search_panel(flush=False)
         session["scan_seq"] = int(session.get("scan_seq") or 0) + 1
         seq = session["scan_seq"]
-        cid_s = str(cid)
+
+        async def _recover_online_sale_after_stale_cart() -> None:
+            cb = session.get("pos_cashbox_id")
+            if not (cb and str(cb).strip()):
+                try:
+                    cbl = await asyncio.to_thread(client.construction_cashboxes_list)
+                    first_cb = _first_cashbox_id_from_list(cbl)
+                    if first_cb:
+                        session["pos_cashbox_id"] = first_cb
+                        cb = first_cb
+                except ApiError:
+                    pass
+            cart_new = await asyncio.to_thread(client.pos_sales_start, cashbox_id=cb if cb else None)
+            session["cart"] = cart_new
+            session["cart_id"] = str(cart_new.get("id")) if cart_new.get("id") else None
+            session["cart_line_unit_overrides"] = {}
+            sid = _shift_id_from_cart(cart_new)
+            if sid:
+                session["active_shift_id"] = sid
+            try:
+                local_products_cache.ingest_cart(client.active_branch_id, cart_new)
+            except Exception:
+                pass
+            _persist_offline_session()
+            render_cart_items(flush=False)
+            snack(
+                "Корзина на сервере устарела — открыта новая продажа. Повторяем скан.",
+                ft.Colors.AMBER_700,
+            )
+            page.update()
 
         async def _scan_task():
             branch = client.active_branch_id
-            cached = local_products_cache.get_cached_scan_row(branch, code)
-            cached_pid = cached.get("product_id") if cached else None
-            cached_unit = cached.get("unit") if cached else None
-            # Быстрый pos_add_item только для явно не-кг (в API часто is_weight=false при unit=кг).
-            use_fast_add = (
-                bool(cached_pid)
-                and cached_unit is not None
-                and not _unit_is_kg(cached_unit)
-            )
+            # Один запрос pos_scan по штрихкоду — без предварительного pos_add_item (два RTT подряд ощущались как «думает»).
             cart: dict[str, Any] | None = None
-            if use_fast_add:
-                try:
-                    cart = await asyncio.to_thread(client.pos_add_item, cid_s, cached_pid)
-                except ApiError:
-                    cart = None
-                except requests.exceptions.RequestException:
-                    if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
-                        try:
-                            cart = offline_pos.scan_barcode(
-                                user_payload=dict(client.user_payload or {}),
-                                branch_id=branch,
-                                cashbox_id=session.get("pos_cashbox_id"),
-                                barcode=code,
-                            )
-                            _apply_session_cart(cart, flush=True)
-                        except OfflineWeightRequired as ex:
-                            current = offline_pos.current_cart(
-                                user_payload=dict(client.user_payload or {}),
-                                branch_id=branch,
-                            )
-                            if current:
-                                _apply_session_cart(current, flush=False)
-                            open_weighed_product_dialog(ex.product)
-                        except OfflinePosError as off_ex:
-                            show_error(str(off_ex))
-                    else:
-                        show_error("Нет сети. Офлайн-сессия недоступна.")
+            for attempt in range(2):
+                cid_s = str(session.get("cart_id") or "")
+                if not cid_s:
+                    if seq == session.get("scan_seq"):
+                        show_error("Сначала начните продажу (кнопка «Начать продажу»)")
                     return
-            if cart is None:
+
                 try:
                     cart = await asyncio.to_thread(client.pos_scan, cid_s, code)
                 except ApiError as ex:
+                    if attempt == 0 and _api_error_cart_not_found(ex):
+                        try:
+                            await _recover_online_sale_after_stale_cart()
+                        except ApiError as rex:
+                            if seq == session.get("scan_seq"):
+                                show_error(_humanize_cart_scan_error(rex))
+                            return
+                        continue
                     if seq == session.get("scan_seq"):
-                        show_error(str(ex))
+                        show_error(_humanize_cart_scan_error(ex))
                     return
                 except requests.exceptions.RequestException:
                     if _activate_offline_mode("нет сети", adopt_current_cart=True, flush=False):
@@ -2778,6 +2820,12 @@ def main(page: ft.Page):
                     else:
                         show_error("Нет сети. Офлайн-сессия недоступна.")
                     return
+
+                if cart is not None:
+                    break
+
+            if cart is None:
+                return
             if seq != session.get("scan_seq"):
                 return
             session["cart"] = cart
@@ -2802,6 +2850,11 @@ def main(page: ft.Page):
             session["barcode_last_ms"] = 0.0
             if len(buf) >= MIN_BARCODE_LEN:
                 process_scan_code(buf)
+            elif search_field_ref.current:
+                # Символы ушли только в поле поиска, Enter пришёл сюда — буфер пустой.
+                q = (search_field_ref.current.value or "").strip()
+                if _looks_like_barcode_query(q) and len(q) >= MIN_BARCODE_LEN:
+                    process_scan_code(q)
             return
         ch = _key_to_barcode_char(key)
         if ch is None:
@@ -2879,7 +2932,7 @@ def main(page: ft.Page):
         async def _add():
             if pick_seq is not None and pick_seq != session.get("pick_product_seq"):
                 return
-            set_loading(True, flush=False)
+            set_loading(True, flush=True)
             try:
                 if pick_seq is not None and pick_seq != session.get("pick_product_seq"):
                     return
@@ -3366,6 +3419,7 @@ def main(page: ft.Page):
                 height=max(40, img_h - 16),
                 fit=ft.BoxFit.CONTAIN,
                 gapless_playback=True,
+                **_catalog_image_filter_kw(),
             )
         else:
             img_ctrl = ft.Icon(ft.Icons.IMAGE_OUTLINED, size=56, color=UI_MUTED)
@@ -3663,6 +3717,28 @@ def main(page: ft.Page):
                     _schedule_hydrate_quick_catalog_thumbs(tab)
                 return
 
+            # Первый заход по филиалу в онлайне: полная выгрузка каталога с сервера в SQLite; дальше — без повторного list/ (только локальная база + точечный search для пресетов).
+            async with catalog_full_sync_lock:
+                if not local_products_cache.is_catalog_full_synced(_bid):
+                    try:
+
+                        def _pull_full_catalog():
+                            return client.products_catalog_full(
+                                max_pages=config.catalog_full_sync_max_pages(),
+                                max_items=config.catalog_full_sync_max_items(),
+                            )
+
+                        full_rows = await asyncio.to_thread(_pull_full_catalog)
+                        if full_rows:
+                            try:
+                                local_products_cache.ingest_product_list(_bid, full_rows)
+                            except Exception:
+                                pass
+                        local_products_cache.set_catalog_full_synced(_bid)
+                    except Exception:
+                        pass
+            cache_pool = await asyncio.to_thread(_sync_cache_pool)
+
             # Онлайн: сразу показываем локальный кэш, чтобы не ждать удалённый каталог.
             if cache_pool:
                 products_map[tab] = _sort_quick_catalog_products(
@@ -3690,11 +3766,14 @@ def main(page: ft.Page):
                     return []
 
             try:
-                catalog_rows = await asyncio.to_thread(
-                    client.products_catalog,
-                    QUICK_CATALOG_CATALOG_ITEMS_CAP,
-                    QUICK_CATALOG_CATALOG_MAX_PAGES,
-                )
+                if local_products_cache.is_catalog_full_synced(_bid):
+                    catalog_rows = []
+                else:
+                    catalog_rows = await asyncio.to_thread(
+                        client.products_catalog,
+                        QUICK_CATALOG_CATALOG_ITEMS_CAP,
+                        QUICK_CATALOG_CATALOG_MAX_PAGES,
+                    )
             except (ApiError, requests.exceptions.RequestException):
                 catalog_rows = []
             ready_catalog = [
@@ -4761,6 +4840,8 @@ def main(page: ft.Page):
             mode="email",
             title="Email",
             submit_text="Готово",
+            dock="right",
+            bottom_lift=88.0,
         )
         password = bind_virtual_keyboard(
             ft.TextField(
@@ -4780,6 +4861,8 @@ def main(page: ft.Page):
             title="Пароль",
             submit=lambda _e=None: do_login(None),
             submit_text="Войти",
+            dock="right",
+            bottom_lift=88.0,
         )
 
         def do_login(_):
@@ -5665,15 +5748,12 @@ def main(page: ft.Page):
             ref=cart_items_col,
             expand=True,
             spacing=0,
-            padding=ft.Padding.symmetric(horizontal=0, vertical=2),
+            padding=ft.Padding.symmetric(horizontal=0, vertical=0),
         )
 
         receipt = ft.Container(
             content=ft.Column(
                 [
-                    ft.Text("Оплата", size=11, weight=ft.FontWeight.W_600, color=UI_MUTED),
-                    ft.Text(ref=status_chip, value="—", size=10, color=UI_MUTED),
-                    ft.Divider(height=1, color=UI_BORDER),
                     ft.Row(
                         [
                             ft.Text("Подытог", size=12, color=UI_MUTED),
@@ -5785,7 +5865,7 @@ def main(page: ft.Page):
                 spacing=6,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
-            padding=14,
+            padding=11,
             bgcolor=UI_SURFACE,
             border_radius=15,
             border=ft.Border.all(1, UI_BORDER),
@@ -5875,7 +5955,7 @@ def main(page: ft.Page):
             bgcolor=UI_SURFACE,
             border_radius=15,
             border=ft.Border.all(1, UI_BORDER),
-            shadow=_COLUMN_CARD_SHADOW,
+            shadow=_column_card_shadow(),
         )
 
         cart_section = ft.Container(
@@ -5883,7 +5963,7 @@ def main(page: ft.Page):
                 [
                     ft.Text(
                         "Текущий чек",
-                        size=11,
+                        size=10,
                         weight=ft.FontWeight.W_600,
                         color=UI_MUTED,
                     ),
@@ -5893,16 +5973,16 @@ def main(page: ft.Page):
                         bgcolor=UI_SURFACE_ELEV,
                         border=ft.Border.all(1, UI_BORDER),
                         border_radius=15,
-                        padding=8,
+                        padding=6,
                         clip_behavior=ft.ClipBehavior.HARD_EDGE,
                     ),
                 ],
                 expand=True,
-                spacing=8,
+                spacing=5,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
             expand=True,
-            padding=0,
+            padding=ft.Padding.only(top=0),
             bgcolor="transparent",
         )
 
@@ -5920,7 +6000,7 @@ def main(page: ft.Page):
                     receipt_section,
                 ],
                 expand=True,
-                spacing=10,
+                spacing=8,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
             expand=_rf,
@@ -5928,7 +6008,7 @@ def main(page: ft.Page):
             bgcolor=UI_SURFACE,
             border_radius=15,
             border=ft.Border.all(1, UI_BORDER),
-            shadow=_COLUMN_CARD_SHADOW,
+            shadow=_column_card_shadow(),
         )
 
         main_splitter = ft.GestureDetector(
@@ -6180,10 +6260,10 @@ def main(page: ft.Page):
                             padding=8,
                             border=ft.Border.all(1, "#1f2937"),
                             shadow=ft.BoxShadow(
-                                blur_radius=12,
-                                spread_radius=1,
-                                color=ft.Colors.with_opacity(0.20, "#000000"),
-                                offset=ft.Offset(0, 4),
+                                blur_radius=4,
+                                spread_radius=0,
+                                color=ft.Colors.with_opacity(0.12, "#000000"),
+                                offset=ft.Offset(0, 2),
                             ),
                             clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
                             content=ft.Column(

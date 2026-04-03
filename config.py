@@ -61,6 +61,7 @@ POS_SYNC_FALLBACK_CUSTOM_ON_STOCK_ERROR = _env_truthy(
 
 # --- Производительность / слабое железо ---
 # DESKTOP_MARKET_LOW_SPEC=1 — снижает лимиты каталога, параллельную подгрузку превью, частоту опроса офлайн-синка.
+# DESKTOP_MARKET_FLAT_UI=1 — без теней у карточек, проще отрисовка (интегрированная графика / моноблоки).
 # DESKTOP_MARKET_DISABLE_CATALOG_IMAGES=1 — не запрашивать картинки товаров в сетке (остаётся иконка-заглушка).
 # Точечная настройка (если LOW_SPEC=0): DESKTOP_MARKET_QUICK_CATALOG_LIMIT, _THUMB_CONCURRENCY,
 # _THUMB_URL_TRIES, _QUICK_CATALOG_PAGES, _QUICK_CATALOG_POOL_MULT, _QUICK_CATALOG_PAGE_ROWS,
@@ -68,6 +69,12 @@ POS_SYNC_FALLBACK_CUSTOM_ON_STOCK_ERROR = _env_truthy(
 
 LOW_SPEC_MODE = _env_truthy("DESKTOP_MARKET_LOW_SPEC", "0")
 DISABLE_CATALOG_IMAGES = _env_truthy("DESKTOP_MARKET_DISABLE_CATALOG_IMAGES", "0")
+# Тени + тяжёлая фильтрация картинок — заметны на слабом GPU; FLAT_UI можно включить отдельно от LOW_SPEC.
+UI_FLAT_MODE = LOW_SPEC_MODE or _env_truthy("DESKTOP_MARKET_FLAT_UI", "0")
+
+
+def ui_flat_mode() -> bool:
+    return UI_FLAT_MODE
 
 
 def catalog_images_disabled() -> bool:
@@ -110,7 +117,7 @@ def _perf_float(key: str, default: float, *, low: float, clamp_min: float) -> fl
 def pos_performance_quick_catalog_limit() -> int:
     return _perf_int(
         "DESKTOP_MARKET_QUICK_CATALOG_LIMIT",
-        60,
+        52,
         low=36,
         clamp_min=12,
         clamp_max=200,
@@ -140,7 +147,7 @@ def pos_performance_catalog_pages() -> int:
 def pos_performance_thumb_concurrency() -> int:
     return _perf_int(
         "DESKTOP_MARKET_THUMB_CONCURRENCY",
-        6,
+        4,
         low=2,
         clamp_min=1,
         clamp_max=12,
@@ -150,7 +157,7 @@ def pos_performance_thumb_concurrency() -> int:
 def pos_performance_thumb_url_tries() -> int:
     return _perf_int(
         "DESKTOP_MARKET_THUMB_URL_TRIES",
-        6,
+        4,
         low=3,
         clamp_min=1,
         clamp_max=12,
@@ -170,7 +177,7 @@ def pos_performance_quick_catalog_page_rows() -> int:
 def pos_performance_live_search_debounce() -> float:
     return _perf_float(
         "DESKTOP_MARKET_LIVE_SEARCH_DEBOUNCE",
-        0.22,
+        0.26,
         low=0.45,
         clamp_min=0.05,
     )
@@ -193,3 +200,25 @@ def pos_performance_catalog_image_box_height() -> int:
         clamp_min=72,
         clamp_max=220,
     )
+
+
+def catalog_full_sync_max_pages() -> int:
+    """Страницы GET …/products/list/ при первичной полной загрузке в SQLite."""
+    return _perf_int(
+        "DESKTOP_MARKET_CATALOG_FULL_SYNC_PAGES",
+        80,
+        low=50,
+        clamp_min=1,
+        clamp_max=250,
+    )
+
+
+def catalog_full_sync_max_items() -> int:
+    raw = os.environ.get("DESKTOP_MARKET_CATALOG_FULL_SYNC_MAX_ITEMS", "").strip()
+    if raw:
+        try:
+            v = int(raw, 0)
+            return max(1000, min(v, 500_000))
+        except ValueError:
+            pass
+    return 100_000
